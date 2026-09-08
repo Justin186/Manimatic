@@ -1,0 +1,68 @@
+{
+  "title": "二次函数图像的平移变换",
+  "problem_type": "quadratic_function",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "y = x² 向右平移 2 个单位会怎样？",
+        "subtitle": "二次函数图像变换",
+        "duration": 3.0
+      }
+    },
+    {
+      "id": 2,
+      "template": "step_card",
+      "params": {
+        "steps": [
+          { "text": "写出原函数", "formula_latex": "y = x^2" },
+          { "text": "右移 2 个单位：x 替换为 x-2", "formula_latex": "y = (x-2)^2" },
+          { "text": "展开得 y = x² - 4x + 4", "formula_latex": "y = x^2 - 4x + 4" },
+          { "text": "顶点坐标为 (2, 0)", "formula_latex": "" }
+        ],
+        "duration": 6.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "axes_plot",
+      "params": {
+        "x_range": [-3, 5, 1],
+        "y_range": [-1, 9, 1],
+        "functions": [
+          { "expr": "x**2", "label": "y = x^2", "color": "BLUE" }
+        ],
+        "caption": "先看原函数 y = x²，顶点在原点",
+        "duration": 4.0
+      }
+    },
+    {
+      "id": 4,
+      "template": "function_transform",
+      "params": {
+        "x_range": [-3, 5, 1],
+        "y_range": [-1, 9, 1],
+        "from_expr": "x**2",
+        "to_expr": "(x-2)**2",
+        "from_label": "y = x^2",
+        "to_label": "y = (x-2)^2",
+        "caption": "左加右减：图像整体向右移动 2 个单位",
+        "duration": 5.0
+      }
+    },
+    {
+      "id": 5,
+      "template": "summary_card",
+      "params": {
+        "title": "小结",
+        "points": [
+          "左加右减，上加下减",
+          "顶点从 (0,0) 移到 (2,0)",
+          "形状不变，只是位置变了"
+        ],
+        "duration": 4.0
+      }
+    }
+  ]
+}

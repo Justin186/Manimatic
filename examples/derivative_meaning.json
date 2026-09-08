@@ -1,0 +1,53 @@
+{
+  "title": "导数的几何意义",
+  "problem_type": "derivative_meaning",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "导数到底是什么？",
+        "subtitle": "割线逼近切线",
+        "duration": 3.0
+      }
+    },
+    {
+      "id": 2,
+      "template": "axes_plot",
+      "params": {
+        "x_range": [-2, 4, 1],
+        "y_range": [-2, 8, 1],
+        "functions": [
+          { "expr": "x**2", "label": "y = x^2", "color": "BLUE" },
+          { "expr": "2*x - 1", "label": "y = 2x - 1", "color": "YELLOW" }
+        ],
+        "caption": "在 x=1 处，切线斜率就是导数",
+        "duration": 5.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "steps": [
+          { "text": "求导", "formula_latex": "y' = 2x" },
+          { "text": "代入 x = 1", "formula_latex": "y'(1) = 2" },
+          { "text": "切线方程", "formula_latex": "y - 1 = 2(x - 1)" }
+        ],
+        "duration": 6.0
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "一句话记住",
+        "points": [
+          "导数 = 切线斜率",
+          "几何上看是割线的极限位置"
+        ],
+        "duration": 4.0
+      }
+    }
+  ]
+}

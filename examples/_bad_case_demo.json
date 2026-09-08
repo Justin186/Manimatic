@@ -1,0 +1,53 @@
+{
+  "_comment": "故意写错的分镜，用来演示校验层如何拦截本会变成静默失败的错误。每次运行只会报第一个错误，修掉再跑就能看到下一个。",
+
+  "title": "错误示范",
+  "problem_type": "demo",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "先看看正确的部分",
+        "duration": 2.0
+      }
+    },
+    {
+      "id": 2,
+      "template": "cool_3d_explosion",
+      "params": {
+        "text": "模型发明了一个不存在的模板"
+      }
+    },
+    {
+      "id": 3,
+      "template": "axes_plot",
+      "params": {
+        "x_range": [-5, 5, 1],
+        "y_range": [-2, 10, 2],
+        "functions": [
+          { "expr": "__import__('os').system('echo pwned')", "color": "BLUE" }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "axes_plot",
+      "params": {
+        "x_range": [10, -10, 1],
+        "functions": [{ "expr": "x**2" }]
+      }
+    },
+    {
+      "id": 5,
+      "template": "function_transform",
+      "params": {
+        "from_expr": "x**2",
+        "to_expr": "x**2",
+        "color": "CHARTREUSE",
+        "camera_angle": 45,
+        "duration": 999
+      }
+    }
+  ]
+}
