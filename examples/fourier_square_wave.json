@@ -1,0 +1,40 @@
+{
+  "title": "傅里叶级数：用正弦波拼出方波",
+  "problem_type": "fourier_series",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "用正弦波能拼出方波吗？",
+        "subtitle": "傅里叶级数的逐项逼近",
+        "duration": 3.0
+      }
+    },
+    {
+      "id": 2,
+      "template": "series_approx",
+      "params": {
+        "x_range": [-4, 4, 1],
+        "y_range": [-1.8, 1.8, 1],
+        "terms": [1, 3, 5, 7, 9, 11],
+        "series": "square",
+        "caption": "每叠加一个更高频的正弦波，就更接近方波一点",
+        "duration": 10.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "summary_card",
+      "params": {
+        "title": "小结",
+        "points": [
+          "方波 = 奇次谐波的无穷叠加",
+          "项数越多，跳变处越陡峭",
+          "但永远无法完全消除过冲（吉布斯现象）"
+        ],
+        "duration": 5.0
+      }
+    }
+  ]
+}

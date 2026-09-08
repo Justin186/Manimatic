@@ -1,0 +1,81 @@
+{
+  "title": "定积分：区间再现换元",
+  "problem_type": "integral_interval_swap",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "求 I = ∫ sin x / (sin x + cos x) dx",
+        "subtitle": "上下限 0 到 pi/2",
+        "duration": 3.5
+      }
+    },
+    {
+      "id": 2,
+      "template": "area_under_curve",
+      "params": {
+        "x_range": [-0.2, 1.95, 0.5],
+        "y_range": [-0.05, 1.1, 0.2],
+        "expr": "sin(x)/(sin(x)+cos(x))",
+        "a": 0.0,
+        "b": 1.5707963,
+        "caption": "积分 = 曲边梯形的面积",
+        "duration": 7.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "axes_plot",
+      "params": {
+        "x_range": [0, 1.7, 0.5],
+        "y_range": [0, 1.05, 0.2],
+        "functions": [
+          { "expr": "sin(x)/(sin(x)+cos(x))",   "label": "y = f(x)",        "color": "BLUE" },
+          { "expr": "cos(x)/(sin(x)+cos(x))",   "label": "y = f(\\pi/2-x)", "color": "YELLOW" }
+        ],
+        "caption": "关键性质：f(x) + f(pi/2 - x) = 1（两条曲线关于 y = 0.5 对称）",
+        "duration": 6.0
+      }
+    },
+    {
+      "id": 4,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 11.0,
+        "steps": [
+          {
+            "text": "设 I = 积分 f(x) dx",
+            "formula_latex": "I = \\int_0^{\\pi/2} \\frac{\\sin x}{\\sin x + \\cos x}\\, dx"
+          },
+          {
+            "text": "换元 x -> pi/2 - t，dx = -dt",
+            "formula_latex": "I = \\int_0^{\\pi/2} \\frac{\\cos t}{\\sin t + \\cos t}\\, dt"
+          },
+          {
+            "text": "两个积分相加，被积函数之和 = 1",
+            "formula_latex": "2I = \\int_0^{\\pi/2} \\frac{\\sin x + \\cos x}{\\sin x + \\cos x}\\, dx = \\int_0^{\\pi/2} 1\\, dx"
+          },
+          {
+            "text": "得 I = pi/4",
+            "formula_latex": "I = \\frac{\\pi}{4}"
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "I = pi/4",
+          "核心：利用 f(x) + f(pi/2 - x) = 1 的对称性",
+          "区间再现是定积分的高频技巧"
+        ],
+        "duration": 4.0
+      }
+    }
+  ]
+}

@@ -113,17 +113,16 @@ def main():
 
     print(f"[OK] 渲染成功，耗时 {elapsed:.1f} 秒")
 
-    # 找最终视频：必须排除 partial_movie_files（那是未合并的分片）
-    mp4 = None
-    for root, _, files in os.walk(OUTPUT):
-        if "partial_movie_files" in root.replace("\\", "/"):
-            continue
-        for fn in files:
-            if fn.endswith(".mp4"):
-                mp4 = os.path.join(root, fn)
-                break
-        if mp4:
-            break
+    # 找最终视频：必须按 manim 的规则精确构造路径，不能遍历。
+    # 遍历会拿到别的场景/别的清晰度的旧文件（字母序在前就中招），
+    # 表现为"渲染成功了但视频是上一次的" —— 又一种静默失败。
+    quality_dir = {"l": "480p15", "m": "720p30", "h": "1080p60",
+                   "p": "1440p60", "k": "2160p60"}[args.quality]
+    mp4 = os.path.join(OUTPUT, "videos", f"{name}_scene",
+                       quality_dir, "StoryboardScene.mp4")
+    if not os.path.exists(mp4):
+        print(f"[WARN] 未在预期路径找到产物: {mp4}")
+        mp4 = None
     if mp4:
         size = os.path.getsize(mp4) / 1024 / 1024
         print(f"\n输出: {mp4}  ({size:.2f} MB)")

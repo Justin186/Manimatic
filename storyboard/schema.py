@@ -21,7 +21,18 @@ TEMPLATE_PARAMS = {
         "from_label", "to_label", "caption", "duration",
     },
     "summary_card": {"title", "points", "duration"},
-    "step_card": {"steps", "duration"},
+    "step_card": {"steps", "duration", "mode"},
+    "vector_wave": {"radius", "duration", "caption"},
+    "series_approx": {
+        "x_range", "y_range", "terms", "series", "caption", "duration",
+    },
+    "taylor_approx": {
+        "x_range", "y_range", "target_expr", "target_label",
+        "terms", "caption", "duration",
+    },
+    "area_under_curve": {
+        "x_range", "y_range", "expr", "a", "b", "caption", "duration",
+    },
 }
 
 
@@ -76,7 +87,8 @@ def _check_label(s, scene_id, field):
             f"会让 MathTex 渲染失败（变成原始 LaTeX 命令）。"
             f"请把中文移到 caption 字段。"
         )
-    return s[:40]
+    # LaTeX 公式本来就比 label 长，给 120 字符的余量
+    return s[:120]
 
 
 def validate(storyboard: dict, registry: dict) -> dict:
@@ -179,6 +191,66 @@ def validate(storyboard: dict, registry: dict) -> dict:
                 st["formula_latex"] = _check_label(
                     str(st.get("formula_latex", "")), sid, "steps[].formula_latex"
                 )
+
+        # 旋转向量：半径范围
+        if "radius" in params:
+            r = float(params["radius"])
+            if not (0.4 <= r <= 2.2):
+                raise SchemaError(f"scene {sid}: radius {r} 超出范围 [0.4, 2.2]")
+            params["radius"] = r
+
+        # terms 字段：按模板分支校验（傅里叶=整数，泰勒=字符串表达式）
+        if "terms" in params:
+            if tpl == "taylor_approx":
+                ts = params["terms"]
+                if not isinstance(ts, list) or not ts:
+                    raise SchemaError(f"scene {sid}: taylor terms 必须是非空数组")
+                if len(ts) > 8:
+                    raise SchemaError(f"scene {sid}: taylor terms 最多 8 项")
+                params["terms"] = [_check_expr(t, sid, f"terms[{i}]") for i, t in enumerate(ts)]
+            else:
+                # series_approx 等：整数谐波
+                ts = params["terms"]
+                if not isinstance(ts, list) or not ts:
+                    raise SchemaError(f"scene {sid}: terms 必须是非空数组")
+                if len(ts) > 8:
+                    raise SchemaError(f"scene {sid}: terms 最多 8 项，当前 {len(ts)}（画面会糊）")
+                out_ts = []
+                for t in ts:
+                    try:
+                        iv = int(t)
+                    except (TypeError, ValueError):
+                        raise SchemaError(f"scene {sid}: terms 元素必须是整数，收到 {t!r}")
+                    if iv < 1 or iv > 99:
+                        raise SchemaError(f"scene {sid}: 谐波次数 {iv} 超出范围 [1, 99]")
+                    out_ts.append(iv)
+                params["terms"] = out_ts
+
+        if "series" in params:
+            s = str(params["series"]).lower()
+            if s not in ("square", "sawtooth"):
+                raise SchemaError(f"scene {sid}: series 只支持 square / sawtooth，收到 {s!r}")
+            params["series"] = s
+
+        # 泰勒/面积模板：目标函数和各项是合法表达式
+        for key in ("target_expr", "expr"):
+            if key in params:
+                params[key] = _check_expr(params[key], sid, key)
+
+        # 积分上下限校验
+        for key in ("a", "b"):
+            if key in params:
+                v = float(params[key])
+                params[key] = v
+        if "a" in params and "b" in params:
+            if params["b"] <= params["a"]:
+                raise SchemaError(f"scene {sid}: b({params['b']}) 必须大于 a({params['a']})")
+
+        if "mode" in params:
+            m = str(params["mode"]).lower()
+            if m not in ("stack", "page"):
+                raise SchemaError(f"scene {sid}: step_card 的 mode 只支持 stack / page，收到 {m!r}")
+            params["mode"] = m
 
         # 文本长度限制（防止溢出画面 —— 这是静默失败的主要来源之一）
         for key in ("text", "subtitle", "caption", "title"):

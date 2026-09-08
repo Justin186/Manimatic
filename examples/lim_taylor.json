@@ -1,0 +1,67 @@
+{
+  "title": "极限：泰勒展开的典型应用",
+  "problem_type": "limit_by_taylor",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "求极限：ln(1+x) - sin x + x^2/2  除以 x^3",
+        "subtitle": "x -> 0",
+        "duration": 3.5
+      }
+    },
+    {
+      "id": 2,
+      "template": "taylor_approx",
+      "params": {
+        "x_range": [-1.2, 3.2, 1],
+        "y_range": [-2.0, 2.0, 1],
+        "target_expr": "log(1+x)",
+        "target_label": "ln(1+x)",
+        "terms": ["x", "-x**2/2", "x**3/3", "-x**4/4", "x**5/5"],
+        "caption": "在 x=0 附近，泰勒多项式逐渐逼近 ln(1+x)",
+        "duration": 11.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 12.0,
+        "steps": [
+          {
+            "text": "把 ln(1+x) 展开到三阶",
+            "formula_latex": "\\ln(1+x) = x - \\frac{x^2}{2} + \\frac{x^3}{3} + O(x^4)"
+          },
+          {
+            "text": "把 sin x 展开到三阶",
+            "formula_latex": "\\sin x = x - \\frac{x^3}{6} + O(x^5)"
+          },
+          {
+            "text": "代入分子，x 与 x 抵消、x^2 与 -x^2/2 抵消",
+            "formula_latex": "\\left(x - \\frac{x^2}{2} + \\frac{x^3}{3}\\right) - \\left(x - \\frac{x^3}{6}\\right) + \\frac{x^2}{2} = \\frac{x^3}{2}"
+          },
+          {
+            "text": "除以 x^3，取极限",
+            "formula_latex": "\\lim_{x \\to 0} \\frac{x^3/2}{x^3} = \\frac{1}{2}"
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "极限 = 1/2",
+          "关键：ln(1+x) 与 sin x 的一次项恰好抵消",
+          "剩下三次项就是答案来源"
+        ],
+        "duration": 4.0
+      }
+    }
+  ]
+}

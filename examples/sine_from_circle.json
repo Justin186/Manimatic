@@ -1,0 +1,50 @@
+{
+  "title": "正弦波是怎么来的",
+  "problem_type": "trigonometry",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "正弦波是怎么来的？",
+        "subtitle": "圆周运动在竖直方向上的投影",
+        "duration": 3.0
+      }
+    },
+    {
+      "id": 2,
+      "template": "vector_wave",
+      "params": {
+        "radius": 1.3,
+        "duration": 8.0,
+        "caption": "匀速旋转一周，竖直高度随时间展开就是正弦曲线"
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 9.0,
+        "steps": [
+          { "text": "设圆半径为 r，转过的角为 t", "formula_latex": "r = 1,\\quad \\theta = t" },
+          { "text": "动点的竖直高度即为 sin t", "formula_latex": "y = \\sin t" },
+          { "text": "把高度按时间依次展开", "formula_latex": "y = \\sin x,\\quad T = 2\\pi" }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "小结",
+        "points": [
+          "正弦是圆周运动的竖直投影",
+          "周期 2π 对应旋转一整圈",
+          "振幅等于圆的半径"
+        ],
+        "duration": 4.0
+      }
+    }
+  ]
+}
