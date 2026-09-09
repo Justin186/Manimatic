@@ -84,14 +84,18 @@ def rich(s, **kw):
     parts = _re_rich.split(r"\$(.+?)\$", s)
     if len(parts) == 1:
         return Text(s, font=CN_FONT, **kw)
+    # 同一 font_size 下，LaTeX 字面的视觉尺寸比中文字符小约 25%（x-height 差异），
+    # 不补偿的话混排行里公式明显偏小、视觉不均衡。
+    # 实测 1.3 倍接近中文字面的视觉高度，过大可下调。
+    fs = kw.pop("font_size", 48)
     mobs = []
     for i, part in enumerate(parts):
         if not part:
             continue
         if i % 2 == 1:  # 奇数段 = 公式（复用 formula 的三级分流，公式段里也可含中文）
-            mobs.append(formula(part, **kw))
+            mobs.append(formula(part, font_size=round(fs * 1.3), **kw))
         else:           # 偶数段 = 中文文字
-            mobs.append(Text(part, font=CN_FONT, **kw))
+            mobs.append(Text(part, font=CN_FONT, font_size=fs, **kw))
     grp = VGroup(*mobs)
     grp.arrange(RIGHT, buff=0.12)
     # 防溢出：混排行整体超宽时等比缩小（画面安全宽度约 11.5 单位）。
@@ -113,7 +117,7 @@ class StoryboardScene(Scene):
 
 def render(storyboard: dict,
            use_latex: bool = True,
-           cn_font: str = "Source Han Serif CN") -> str:
+           cn_font: str = "STZhongsong") -> str:
     """
     把校验过的分镜 JSON 渲染成 Manim Python 源码。
 
@@ -181,7 +185,7 @@ def render(storyboard: dict,
 
 
 def render_to_file(storyboard: dict, out_path: str, use_latex: bool = True,
-                   cn_font: str = "SimSun") -> str:
+                   cn_font: str = "STZhongsong") -> str:
     """渲染并写入 .py 文件，返回文件路径。"""
     src = render(storyboard, use_latex=use_latex, cn_font=cn_font)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
