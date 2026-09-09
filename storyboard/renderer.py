@@ -99,12 +99,34 @@ def render(storyboard: dict,
     env = {"formula": "formula", "use_latex": use_latex}
 
     blocks = []
-    for sc in storyboard["scenes"]:
+    for idx, sc in enumerate(storyboard["scenes"]):
         tpl_name = sc["template"]
         fn = templates.TEMPLATE_REGISTRY[tpl_name]
         code = fn(sc["params"], env)
+
+        # ---- 分镜边界：统一清屏 ----
+        #
+        # 为什么放在这里而不是让每个模板自己清：
+        #   清屏是"分镜之间"的规则，不是"某个模板"的规则。
+        #   之前靠模板自觉（末尾 FadeOut），但 step_card 的累积板书
+        #   需要保留到本分镜结束，于是下一个分镜就直接叠了上去 ——
+        #   画面能渲染、代码不报错，内容却是错的（静默失败）。
+        #   放在渲染层统一处理，任何模板（包括以后新加的）都不可能漏掉。
+        if idx == 0:
+            head = ""
+        else:
+            head = (
+                "        # ---- 清屏：移除上一个分镜的残留 ----\n"
+                "        if self.mobjects:\n"
+                "            self.play(FadeOut(Group(*self.mobjects)), run_time=0.35)\n"
+                "            self.clear()\n"
+            )
+
         blocks.append(
-            f"        # ---- scene {sc['id']} | template: {tpl_name} ----\n{code}\n"
+            head
+            + f"        # ---- scene {sc['id']} | template: {tpl_name} ----\n"
+            + code
+            + "\n"
         )
 
     body = "\n".join(blocks)

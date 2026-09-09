@@ -389,6 +389,20 @@ def taylor_approx(params, env):
         lines.append(f'        cap.to_edge(UP, buff=0.45)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
+    # 图例：右上角，"目标函数 + 各阶泰勒多项式"
+    lines.append(f'        legend_items = VGroup()')
+    lines.append(f'        _l0 = Line(LEFT * 0.18, RIGHT * 0.18, color=WHITE, stroke_width=2.5).set_opacity(0.55)')
+    lines.append(f'        _l0_label = Text("f(x) = {target}", font_size=16, font=CN_FONT, color=WHITE).next_to(_l0, RIGHT, buff=0.12)')
+    lines.append(f'        legend_items.add(VGroup(_l0, _l0_label))')
+    for i, t in enumerate(terms):
+        col = _hex_lerp("#58C4DD", "#FFFF00", i / max(len(terms) - 1, 1))
+        _seg_lbl_str = "T_{" + str(i + 1) + "}=" + t
+        lines.append(f'        _seg = Line(LEFT * 0.18, RIGHT * 0.18, color="{col}", stroke_width=2.2)')
+        lines.append(f'        _seg_lbl = Text("{_seg_lbl_str}", font_size=16, font=CN_FONT, color=WHITE).next_to(_seg, RIGHT, buff=0.12)')
+        lines.append(f'        legend_items.add(VGroup(_seg, _seg_lbl))')
+    lines.append(f'        legend_items.arrange(DOWN, aligned_edge=LEFT, buff=0.14).to_corner(UR, buff=0.45).scale(0.95)')
+    lines.append(f'        self.play(FadeIn(legend_items), run_time=0.5)')
+
     lines.append(f'        self.wait(0.8)')
     lines.append(f'        self.play(FadeOut(Group(*self.mobjects)), run_time=0.5)')
     return "\n".join(lines)
@@ -514,7 +528,8 @@ def step_card(params, env):
 
     def slot_h(st):
         """每步占据的垂直槽位高度（Manim 单位），有公式的更高。"""
-        return 1.20 if st.get("formula_latex") else 0.78
+        # 经验值：26pt 中文 + 32pt 公式 + 0.30 间隙 ≈ 1.50，留 0.05 余量
+        return 1.55 if st.get("formula_latex") else 0.85
 
     total = sum(slot_h(s) for s in steps) or 1.0
     scale = 1.0 if total <= AVAIL else AVAIL / total
