@@ -31,18 +31,25 @@ USE_LATEX = {use_latex}
 
 def formula(s, **kw):
     """
-    公式渲染：自动分流，避免两类常见崩溃。
+    公式渲染：三级分流，避免渲染崩溃并最大化表现力。
 
-    1. 没有 LaTeX 环境     → 退回 Text（保证不崩，公式变纯文本）
-    2. 字符串里含中文      → 退回 Text（MathTex 默认无 ctex，中文会直接报错）
+    1. 纯 LaTeX（无中文）→ MathTex：快（dvi 路线），适合绝大多数公式
+    2. 含中文           → Tex + ctex 模板：走 xelatex，公式里可以直接嵌中文
+                          （如 \\text{{顶点}}(2,0) 不会再显示成原始命令）
+    3. 无 LaTeX 环境     → Text 兜底：保证不崩，公式变纯文本
 
-    第 2 条不是理论风险：大模型很常见地把「令 x 趋近于 0」这类中文
-    一起写进 formula_latex 字段，结果整个场景渲染失败。
-    这里做了兜底，宁可显示成中文文本，也不能让视频渲染不出来。
+    ctex 模板来自 Manim 官方 TexTemplateLibrary（见官方文档 using_text.md）。
+    首次编译会触发 MiKTeX 自动安装宏包，可能偏慢（数十秒），之后走缓存。
     """
-    if USE_LATEX and not _has_cjk(s):
+    if not USE_LATEX:
+        return Text(s, font=CN_FONT, **kw)
+    if not _has_cjk(s):
         return MathTex(s, **kw)
-    return Text(s, font=CN_FONT, **kw)
+    try:
+        return Tex(f"${{s}}$", tex_template=TexTemplateLibrary.ctex, **kw)
+    except Exception:
+        # ctex 宏包缺失等编译失败时退回纯文本 —— 响亮失败不如降级可用
+        return Text(s, font=CN_FONT, **kw)
 
 
 def formula_parts(text_parts, **kw):
@@ -62,6 +69,38 @@ def formula_parts(text_parts, **kw):
     return grp
 
 
+import re as _re_rich
+
+def rich(s, **kw):
+    """
+    行内混排：字符串里用 $...$ 包 LaTeX 公式，其余是中文。
+
+    例：rich("由 $f'(x)=3x^2-3$ 得驻点 $x=\\\\pm 1$")
+    → ["由 ", MathTex("f'(x)=3x^2-3"), " 得驻点 ", MathTex("x=\\\\pm 1")]
+
+    为什么用 $ 分隔符：LLM 写 Markdown 时本来就习惯 $...$ 包公式，
+    不需要额外教学；校验层也容易检查（$ 内禁中文）。
+    """
+    parts = _re_rich.split(r"\$(.+?)\$", s)
+    if len(parts) == 1:
+        return Text(s, font=CN_FONT, **kw)
+    mobs = []
+    for i, part in enumerate(parts):
+        if not part:
+            continue
+        if i % 2 == 1:  # 奇数段 = 公式（复用 formula 的三级分流，公式段里也可含中文）
+            mobs.append(formula(part, **kw))
+        else:           # 偶数段 = 中文文字
+            mobs.append(Text(part, font=CN_FONT, **kw))
+    grp = VGroup(*mobs)
+    grp.arrange(RIGHT, buff=0.12)
+    # 防溢出：混排行整体超宽时等比缩小（画面安全宽度约 11.5 单位）。
+    # 不做这步，长句会静默超出画面 —— 又一个只有看视频才能发现的坑。
+    if grp.width > 11.5:
+        grp.scale_to_fit_width(11.5)
+    return grp
+
+
 class StoryboardScene(Scene):
     def construct(self):
         self.camera.background_color = BG
@@ -74,14 +113,14 @@ class StoryboardScene(Scene):
 
 def render(storyboard: dict,
            use_latex: bool = True,
-           cn_font: str = "Microsoft YaHei") -> str:
+           cn_font: str = "SimSun") -> str:
     """
     把校验过的分镜 JSON 渲染成 Manim Python 源码。
 
     Args:
         storyboard: 已经过 schema.validate() 的分镜 dict
         use_latex: 是否用 LaTeX 渲染公式（没装 LaTeX 时传 False）
-        cn_font: 中文字体
+        cn_font: 中文字体（宋体 SimSun / 楷体 KaiTi / 微软雅黑 Microsoft YaHei）
 
     Returns:
         Manim 场景源码字符串
@@ -141,9 +180,10 @@ def render(storyboard: dict,
     return src
 
 
-def render_to_file(storyboard: dict, out_path: str, use_latex: bool = True) -> str:
+def render_to_file(storyboard: dict, out_path: str, use_latex: bool = True,
+                   cn_font: str = "SimSun") -> str:
     """渲染并写入 .py 文件，返回文件路径。"""
-    src = render(storyboard, use_latex=use_latex)
+    src = render(storyboard, use_latex=use_latex, cn_font=cn_font)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(src)

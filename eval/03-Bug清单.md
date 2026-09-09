@@ -78,6 +78,26 @@
 
 ---
 
+### BUG-006 中文 Windows 下 subprocess 读取 manim 输出崩溃
+
+- **发现者**：用户本机跑 run_all.bat
+- **现象**：`UnicodeDecodeError: 'gbk' codec can't decode byte ...`；多数题渲染成功但输出报错，c2 一题卡死需 Ctrl+C
+- **根因**：`generate.py` 的 `subprocess.run(text=True)` 未指定编码，中文 Windows 用 GBK 解码 manim 的 UTF-8 输出。**AI 侧沙箱 locale 是 UTF-8，所以 AI 跑不出这个 bug** —— 环境相关 bug 只有真机才暴露。
+- **修法**：`subprocess.run(..., encoding="utf-8", errors="replace")`
+- **状态**：✅ 已修
+- **教训**：凡涉及 subprocess 文本输出，encoding 必须显式指定，`errors="replace"` 兜底。
+
+---
+
+### BUG-007 HEADER.format() 把代码模板里的花括号当占位符
+
+- **发现者**：AI（改 rich/formula 后首次渲染）
+- **现象**：`KeyError: '顶点'` / `KeyError: 's'`
+- **根因**：HEADER 是经 `.format()` 处理的模板字符串，函数体 docstring 里的 `\text{顶点}`、f-string 里的 `f"${s}$"` 都被当占位符解析
+- **修法**：HEADER 内字面花括号一律写成 `{{ }}`
+- **状态**：✅ 已修
+- **教训**：用字符串模板生成代码时，模板内一切非占位符花括号都要转义；这是这类"代码生成器"的经典坑。
+
 ## 待修复
 
 （跑 15 题时往这里加）

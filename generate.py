@@ -33,6 +33,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="只生成代码，不渲染")
     ap.add_argument("--no-latex", action="store_true", help="强制不用 LaTeX")
     ap.add_argument("--keep-code", action="store_true", help="保留生成的 .py 文件")
+    ap.add_argument("--font", default="SimSun",
+                    help="中文字体（SimSun=宋体 / KaiTi=楷体 / Microsoft YaHei=雅黑）")
     args = ap.parse_args()
 
     # ---------- 1. 读取 ----------
@@ -80,7 +82,7 @@ def main():
 
     name = os.path.splitext(os.path.basename(path))[0]
     py_path = os.path.join(OUTPUT, f"{name}_scene.py")
-    renderer.render_to_file(sb, py_path, use_latex=use_latex)
+    renderer.render_to_file(sb, py_path, use_latex=use_latex, cn_font=args.font)
     n_lines = sum(1 for _ in open(py_path, encoding="utf-8"))
     print(f"[3/4] 生成 Manim 代码: {py_path}  ({n_lines} 行, LaTeX={use_latex})")
 
@@ -94,11 +96,17 @@ def main():
     print(f"[4/4] 渲染中（-q{args.quality}）...")
     t1 = time.time()
     try:
+        # encoding / errors 必须显式指定：
+        #   中文 Windows 的 locale 是 GBK，而 manim 输出的是 UTF-8。
+        #   不指定的话 subprocess 会用 GBK 解码 → UnicodeDecodeError，
+        #   读取线程直接崩掉，主流程卡死在 communicate() 上（表面上像"渲染卡住"）。
+        #   errors="replace" 是兜底：即使有解不出的字节也只替换，不让线程死。
         r = subprocess.run(
             [sys.executable, "-m", "manim", "render",
              f"-q{args.quality}", "--disable_caching",
              "--media_dir", OUTPUT, py_path, "StoryboardScene"],
             capture_output=True, text=True, timeout=900, cwd=OUTPUT,
+            encoding="utf-8", errors="replace",
         )
         elapsed = time.time() - t1
     except subprocess.TimeoutExpired:

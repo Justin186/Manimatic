@@ -74,13 +74,34 @@ def main():
         results["latex"] = False
 
     print("\n--- 中文字体 ---")
-    font_dir = r"C:\Windows\Fonts"
-    for f in ["msyh.ttc", "msyhbd.ttc", "simhei.ttf"]:
-        if os.path.exists(os.path.join(font_dir, f)):
-            print(f"{OK} 找到中文字体 {f}")
-            break
-    else:
-        print(f"{WARN} 未找到微软雅黑/黑体，中文可能显示为方块")
+    # 用 Pango 的字体列表检查（官方文档推荐方式），比扫 Fonts 目录准：
+    # Pango 能看到的不只是文件，还包括按字体家族名注册的所有变体。
+    # 若要求的字体不在列表里，Manim 会静默 fallback 到默认字体 —— 又一个静默失败点。
+    try:
+        import manimpango
+        fonts = manimpango.list_fonts()
+        wanted = {"SimSun": "宋体", "KaiTi": "楷体", "Microsoft YaHei": "微软雅黑",
+                  "SimHei": "黑体", "NSimSun": "新宋体"}
+        found_any = False
+        for fam, zh in wanted.items():
+            mark = OK if fam in fonts else WARN
+            if fam in fonts:
+                found_any = True
+            print(f"{mark} {fam}（{zh}）: {'可用' if fam in fonts else '未注册到 Pango'}")
+        if not found_any:
+            print(f"{BAD} 没有任何常用中文字体！中文将显示为方块。")
+    except ImportError:
+        print(f"{WARN} manimpango 不可用，跳过字体检查")
+
+    # ctex 模板可用性：决定「公式里嵌中文」是否走真 LaTeX 渲染
+    print("\n--- ctex（公式内中文）---")
+    try:
+        from manim import TexTemplateLibrary
+        t = TexTemplateLibrary.ctex
+        print(f"{OK} TexTemplateLibrary.ctex 可用（xelatex 路线，公式内可嵌中文）")
+        print("      首次编译会触发 MiKTeX 自动安装宏包，偏慢；之后走缓存。")
+    except Exception as e:
+        print(f"{WARN} ctex 模板异常：{e}")
 
     # 最小渲染测试
     print("\n--- 最小渲染测试 ---")

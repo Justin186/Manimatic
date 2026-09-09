@@ -69,24 +69,18 @@ def _check_expr(expr, scene_id, field):
 
 def _check_label(s, scene_id, field):
     """
-    校验 LaTeX 标签字段：禁止中文。
+    校验 LaTeX 标签字段，返回规范化字符串。
 
-    为什么：MathTex 默认无 ctex 宏包，含中文（如 \\text{顶点}）时
-    LaTeX 编译失败，Manim 不会报错，但会把原始 LaTeX 命令原样
-    显示在画面上 —— 正是我们方案要消除的「静默失败」。
+    2026-09-09 更新：放开中文限制。
+    之前禁中文是因为 MathTex 无 ctex，中文会把原始 LaTeX 命令画上屏幕（静默失败）。
+    现在 renderer.formula() 对含中文的公式自动切换 Manim 官方 ctex 模板
+    （TexTemplateLibrary.ctex，走 xelatex），中文可以直接嵌在公式里，
+    所以这里不再需要拦截 —— 技术问题用技术解决，比一禁了之表现力强。
 
-    需要中英混排请走 caption（用 Text 渲染）。
+    注意：ctex 首次编译会触发 MiKTeX 自动装宏包，偏慢（数十秒），之后走缓存。
     """
     if not isinstance(s, str):
         return ""
-    import re
-    cjk = re.search(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]", s)
-    if cjk:
-        raise SchemaError(
-            f"scene {scene_id}: {field} 含中文 {cjk.group()!r}，"
-            f"会让 MathTex 渲染失败（变成原始 LaTeX 命令）。"
-            f"请把中文移到 caption 字段。"
-        )
     # LaTeX 公式本来就比 label 长，给 120 字符的余量
     return s[:120]
 

@@ -65,11 +65,11 @@ def title_card(params, env):
     duration = float(params.get("duration", 2.0))
 
     lines = []
-    lines.append(f'        title = Text("{text}", font_size=44, font=CN_FONT, color=PRIMARY)')
+    lines.append(f'        title = rich("{text}", font_size=44, color=PRIMARY)')
     lines.append(f'        title.to_edge(UP, buff=1.2)')
     lines.append(f'        self.play(Write(title), run_time=1.2)')
     if subtitle:
-        lines.append(f'        sub = Text("{subtitle}", font_size=26, font=CN_FONT, color=SECONDARY)')
+        lines.append(f'        sub = rich("{subtitle}", font_size=26, color=SECONDARY)')
         lines.append(f'        sub.next_to(title, DOWN, buff=0.5)')
         lines.append(f'        self.play(FadeIn(sub), run_time=0.8)')
     lines.append(f'        self.wait({max(duration - 2.0, 0.5)})')
@@ -113,7 +113,7 @@ def axes_plot(params, env):
             lines.append(f'        self.play(FadeIn(lbl{i}), run_time=0.6)')
 
     if caption:
-        lines.append(f'        cap = Text("{caption}", font_size=24, font=CN_FONT, color=WHITE)')
+        lines.append(f'        cap = rich("{caption}", font_size=24, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.5)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -165,7 +165,7 @@ def function_transform(params, env):
         lines.append(f'        self.play(Transform(l0, l1), run_time=1.0)')
 
     if caption:
-        lines.append(f'        cap = Text("{caption}", font_size=24, font=CN_FONT, color=WHITE)')
+        lines.append(f'        cap = rich("{caption}", font_size=24, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.5)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -185,14 +185,14 @@ def summary_card(params, env):
     duration = float(params.get("duration", 3.0))
 
     lines = []
-    lines.append(f'        head = Text("{title}", font_size=38, font=CN_FONT, color=ACCENT)')
+    lines.append(f'        head = rich("{title}", font_size=38, color=ACCENT)')
     lines.append(f'        head.to_edge(UP, buff=1.0)')
     lines.append(f'        self.play(Write(head), run_time=1.0)')
 
     lines.append(f'        items = VGroup()')
     for p in points:
         p = str(p).replace('"', '\\"')
-        lines.append(f'        items.add(Text("{p}", font_size=26, font=CN_FONT, color=WHITE))')
+        lines.append(f'        items.add(rich("{p}", font_size=26, color=WHITE))')
     lines.append(f'        items.arrange(DOWN, aligned_edge=LEFT, buff=0.35)')
     lines.append(f'        items.next_to(head, DOWN, buff=0.6).to_edge(LEFT, buff=1.5)')
     lines.append(f'        for it in items:')
@@ -257,7 +257,7 @@ def vector_wave(params, env):
     lines.append(f'        self.add(dot, rline, hline, curve)')
 
     if caption:
-        lines.append(f'        cap = Text("{caption}", font_size=24, font=CN_FONT, color=WHITE)')
+        lines.append(f'        cap = rich("{caption}", font_size=24, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.5)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -325,7 +325,7 @@ def series_approx(params, env):
         lines.append(f'        prev = c{i}')
 
     if caption:
-        lines.append(f'        cap = Text("{caption}", font_size=24, font=CN_FONT, color=WHITE)')
+        lines.append(f'        cap = rich("{caption}", font_size=24, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.5)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -371,6 +371,7 @@ def taylor_approx(params, env):
     lines.append(f'        self.play(Create(tgt), run_time=1.1)')
 
     lines.append(f'        prev = None')
+    lines.append(f'        err = None')
     acc = ""
     for i, t in enumerate(terms):
         acc = f"{acc} + ({t})" if acc else f"({t})"
@@ -383,9 +384,18 @@ def taylor_approx(params, env):
             lines.append(f'        self.play(prev.animate.set_stroke(opacity=0.30, width=1.2), run_time=0.25)')
         lines.append(f'        self.play(Create(p{i}), run_time={min(per, 1.5)})')
         lines.append(f'        prev = p{i}')
+        # 误差区域：目标函数与当前多项式之间的红色填充，随阶数升高而缩小
+        # ——"逼近"二字的视觉化。同样是 Manim 现成 API（get_area）。
+        lines.append(f'        _err{i} = ax.get_area(tgt, x_range=[{xr[0]}, {xr[1]}],'
+                     f' bounded_graph=p{i}, color=RED, opacity=0.22, stroke_width=0)')
+        lines.append(f'        if err is None:')
+        lines.append(f'            self.play(FadeIn(_err{i}), run_time=0.4)')
+        lines.append(f'        else:')
+        lines.append(f'            self.play(Transform(err, _err{i}), run_time=0.4)')
+        lines.append(f'        err = _err{i}')
 
     if caption:
-        lines.append(f'        cap = Text("{caption}", font_size=23, font=CN_FONT, color=WHITE)')
+        lines.append(f'        cap = rich("{caption}", font_size=23, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.45)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -453,8 +463,22 @@ def area_under_curve(params, env):
                  f' color=ACCENT, opacity=0.42)')
     lines.append(f'        self.play(GrowFromEdge(area, LEFT), run_time={min(duration * 0.45, 2.0)})')
 
+    # 黎曼矩形逼近：n=8 → n=24 → n=60，矩形逐渐贴合曲线。
+    # 这是"积分 = 无限分割求和"最直观的动态解释，比静态填充有说服力得多。
+    # get_riemann_rectangles 是 Manim 现成 API，确定性代码，零风险。
+    lines.append(f'        riemanns = VGroup()')
+    for n in (8, 24, 60):
+        lines.append(f'        riemanns.add(ax.get_riemann_rectangles('
+                     f' curve, x_range=[{a}, {b}], dx=({b} - {a}) / {n},'
+                     f' color=PRIMARY, fill_opacity=0.55, stroke_width=0.5,'
+                     f' input_sample_type="left"))')
+    lines.append(f'        self.play(Transform(area, riemanns[0]), run_time=1.0)')
+    lines.append(f'        self.play(Transform(area, riemanns[1]), run_time=1.0)')
+    lines.append(f'        self.play(Transform(area, riemanns[2]), run_time=1.1)')
+    lines.append(f'        self.play(area.animate.set_opacity(0.42), run_time=0.5)')
+
     if caption:
-        lines.append(f'        cap = Text("{caption}", font_size=23, font=CN_FONT, color=WHITE)')
+        lines.append(f'        cap = rich("{caption}", font_size=23, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.45)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -498,7 +522,7 @@ def step_card(params, env):
             text = str(st.get("text", "")).replace('"', '\\"')
             formula = str(st.get("formula_latex", "")).replace('"', '\\"')
             lines.append(f'        grp = VGroup()')
-            lines.append(f'        t = Text("第 {i + 1} 步  {text}", font_size=26, font=CN_FONT, color=WHITE)')
+            lines.append(f'        t = rich("第 {i + 1} 步  {text}", font_size=26, color=WHITE)')
             lines.append(f'        t.to_edge(UP, buff=1.0).to_edge(LEFT, buff=1.0)')
             lines.append(f'        grp.add(t)')
             if formula:
@@ -555,7 +579,7 @@ def step_card(params, env):
         cy = y_cursor - h / 2.0      # 该槽位的中心 y
         y_cursor -= h                # 光标下移，为下一步留位 → 天然不重叠
 
-        lines.append(f'        _t{i} = Text("第 {i + 1} 步  {text}", font_size={fs_t}, font=CN_FONT, color=WHITE)')
+        lines.append(f'        _t{i} = rich("第 {i + 1} 步  {text}", font_size={fs_t}, color=WHITE)')
         lines.append(f'        {g} = VGroup(_t{i})')
         if formula:
             lines.append(f'        _f{i} = {env["formula"]}(r"""{formula}""", font_size={fs_f}, color=ACCENT)')
