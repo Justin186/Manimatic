@@ -1,0 +1,80 @@
+{
+  "title": "极限：tan x 与 sin x 的差",
+  "problem_type": "limit_by_taylor",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "求极限：(tan x - sin x) 除以 x^3",
+        "subtitle": "x -> 0",
+        "duration": 3.5
+      }
+    },
+    {
+      "id": 2,
+      "template": "taylor_approx",
+      "params": {
+        "x_range": [-1.3, 1.3, 1],
+        "y_range": [-2.5, 2.5, 1],
+        "target_expr": "sin(x)/cos(x)",
+        "target_label": "\\tan x",
+        "terms": ["x", "x**3/3"],
+        "caption": "tan x 展开：一次项 x，三次项 x^3/3",
+        "duration": 9.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "taylor_approx",
+      "params": {
+        "x_range": [-1.3, 1.3, 1],
+        "y_range": [-2.5, 2.5, 1],
+        "target_expr": "sin(x)",
+        "target_label": "\\sin x",
+        "terms": ["x", "-x**3/6"],
+        "caption": "sin x 展开：一次项 x，三次项 -x^3/6",
+        "duration": 9.0
+      }
+    },
+    {
+      "id": 4,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 12.0,
+        "steps": [
+          {
+            "text": "写出两个展开式",
+            "formula_latex": "\\tan x = x + \\frac{x^3}{3},\\quad \\sin x = x - \\frac{x^3}{6}"
+          },
+          {
+            "text": "相减，一次项 x 抵消",
+            "formula_latex": "\\tan x - \\sin x = \\frac{x^3}{3} + \\frac{x^3}{6} = \\frac{x^3}{2}"
+          },
+          {
+            "text": "除以 x^3",
+            "formula_latex": "\\frac{\\tan x - \\sin x}{x^3} = \\frac{x^3/2}{x^3} = \\frac{1}{2}"
+          },
+          {
+            "text": "取极限",
+            "formula_latex": "\\lim_{x \\to 0} \\frac{\\tan x - \\sin x}{x^3} = \\frac{1}{2}"
+          }
+        ]
+      }
+    },
+    {
+      "id": 5,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "极限 = 1/2",
+          "关键：tan x 与 sin x 的一次项都是 x，相减抵消",
+          "差别只在三次项：1/3 与 -1/6，合起来是 1/2"
+        ],
+        "duration": 5.0
+      }
+    }
+  ]
+}

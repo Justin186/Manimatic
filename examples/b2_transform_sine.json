@@ -1,0 +1,68 @@
+{
+  "title": "三角函数的相位变换",
+  "problem_type": "function_transform",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "y = sin x 经过怎样的变换得到 y = 3sin(2x + pi/4)",
+        "subtitle": "周期与相位",
+        "duration": 3.5
+      }
+    },
+    {
+      "id": 2,
+      "template": "function_transform",
+      "params": {
+        "x_range": [-3.2, 3.2, 1],
+        "y_range": [-3.5, 3.5, 1],
+        "from_expr": "sin(x)",
+        "to_expr": "3*sin(2*x + pi/4)",
+        "from_label": "y = \\sin x",
+        "to_label": "y = 3\\sin(2x + \\frac{\\pi}{4})",
+        "caption": "周期从 2pi 变为 pi，振幅从 1 变为 3",
+        "duration": 7.5
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 11.0,
+        "steps": [
+          {
+            "text": "先提取 x 的系数，看清相位",
+            "formula_latex": "3\\sin(2x + \\tfrac{\\pi}{4}) = 3\\sin\\left[2\\left(x + \\tfrac{\\pi}{8}\\right)\\right]"
+          },
+          {
+            "text": "x 换成 2x，周期变为原来的一半",
+            "formula_latex": "T = \\frac{2\\pi}{2} = \\pi"
+          },
+          {
+            "text": "x 换成 x + pi/8，图像左移 pi/8",
+            "formula_latex": "\\sin(2x) \\ \\longrightarrow \\ \\sin\\left[2\\left(x + \\tfrac{\\pi}{8}\\right)\\right]"
+          },
+          {
+            "text": "整体乘 3，振幅变为 3",
+            "formula_latex": "A = 1 \\ \\longrightarrow \\ A = 3"
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "横向压缩为 1/2（周期 π）→ 左移 π/8 → 纵向拉伸 3 倍",
+          "易错点：相位是 π/8 不是 π/4",
+          "原因：必须先提取 x 的系数 2"
+        ],
+        "duration": 5.0
+      }
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "title": "导数的乘积法则",
+  "problem_type": "derivative_product_rule",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "求导：x^2 乘以 ln x",
+        "subtitle": "乘积法则",
+        "duration": 3.0
+      }
+    },
+    {
+      "id": 2,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 12.0,
+        "steps": [
+          {
+            "text": "设两个因式，分别求导",
+            "formula_latex": "u = x^2,\\ u' = 2x;\\quad v = \\ln x,\\ v' = \\frac{1}{x}"
+          },
+          {
+            "text": "套用乘积法则 (uv)' = u'v + uv'",
+            "formula_latex": "(x^2 \\ln x)' = 2x \\cdot \\ln x + x^2 \\cdot \\frac{1}{x}"
+          },
+          {
+            "text": "化简第二项",
+            "formula_latex": "= 2x \\ln x + x"
+          },
+          {
+            "text": "提取公因式 x",
+            "formula_latex": "= x(2\\ln x + 1)"
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "导数 = x(2ln x + 1)",
+          "定义域 x > 0（ln x 要求）",
+          "乘积法则：(uv)' = u'v + uv'，不要漏项"
+        ],
+        "duration": 4.5
+      }
+    }
+  ]
+}

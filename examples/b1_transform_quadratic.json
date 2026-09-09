@@ -1,0 +1,68 @@
+{
+  "title": "二次函数的复合变换",
+  "problem_type": "function_transform",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "y = x^2 经过怎样的变换得到 y = 2(x-1)^2 + 3",
+        "subtitle": "平移与伸缩",
+        "duration": 3.5
+      }
+    },
+    {
+      "id": 2,
+      "template": "function_transform",
+      "params": {
+        "x_range": [-2, 4, 1],
+        "y_range": [-1, 9, 1],
+        "from_expr": "x**2",
+        "to_expr": "2*(x-1)**2 + 3",
+        "from_label": "y = x^2",
+        "to_label": "y = 2(x-1)^2 + 3",
+        "caption": "蓝线变黄线：右移 1，纵向拉伸 2 倍，上移 3",
+        "duration": 7.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 11.0,
+        "steps": [
+          {
+            "text": "第一步：x 换成 x - 1，图像右移 1 个单位",
+            "formula_latex": "y = x^2 \\ \\longrightarrow \\ y = (x-1)^2"
+          },
+          {
+            "text": "第二步：整体乘 2，纵向拉伸为原来的 2 倍",
+            "formula_latex": "y = (x-1)^2 \\ \\longrightarrow \\ y = 2(x-1)^2"
+          },
+          {
+            "text": "第三步：整体加 3，图像上移 3 个单位",
+            "formula_latex": "y = 2(x-1)^2 \\ \\longrightarrow \\ y = 2(x-1)^2 + 3"
+          },
+          {
+            "text": "顶点从原点移到 (1, 3)",
+            "formula_latex": "(0,0) \\ \\longrightarrow \\ (1,\\ 3)"
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "右移 1 → 纵向拉伸 2 倍 → 上移 3",
+          "口诀：左加右减，上加下减",
+          "注意顺序：先平移再伸缩，或先提出系数"
+        ],
+        "duration": 4.5
+      }
+    }
+  ]
+}

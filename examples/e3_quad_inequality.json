@@ -1,0 +1,67 @@
+{
+  "title": "一元二次不等式",
+  "problem_type": "quadratic_inequality",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "解不等式：x^2 - 5x + 6 < 0",
+        "subtitle": "因式分解法",
+        "duration": 3.0
+      }
+    },
+    {
+      "id": 2,
+      "template": "axes_plot",
+      "params": {
+        "x_range": [-1, 5, 1],
+        "y_range": [-1.5, 3, 1],
+        "functions": [
+          { "expr": "x**2 - 5*x + 6", "label": "y = x^2 - 5x + 6", "color": "BLUE" }
+        ],
+        "caption": "小于 0，就是找图像在 x 轴下方的部分",
+        "duration": 6.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 11.0,
+        "steps": [
+          {
+            "text": "因式分解左边",
+            "formula_latex": "x^2 - 5x + 6 = (x-2)(x-3) < 0"
+          },
+          {
+            "text": "求对应方程的两个根",
+            "formula_latex": "x_1 = 2,\\quad x_2 = 3"
+          },
+          {
+            "text": "二次项系数为正，开口向上，取两根之间",
+            "formula_latex": "a = 1 > 0"
+          },
+          {
+            "text": "写出解集",
+            "formula_latex": "2 < x < 3"
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "解集：(2, 3)",
+          "口诀：大于取两边，小于取中间",
+          "前提：二次项系数先化为正数"
+        ],
+        "duration": 4.5
+      }
+    }
+  ]
+}

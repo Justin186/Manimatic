@@ -1,0 +1,63 @@
+{
+  "title": "定积分：幂函数的面积",
+  "problem_type": "definite_integral",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "计算定积分：x^2 从 0 到 1",
+        "subtitle": "面积法",
+        "duration": 3.5
+      }
+    },
+    {
+      "id": 2,
+      "template": "area_under_curve",
+      "params": {
+        "x_range": [-0.4, 1.5, 0.5],
+        "y_range": [-0.15, 1.3, 0.5],
+        "expr": "x**2",
+        "a": 0.0,
+        "b": 1.0,
+        "caption": "积分 = 曲线下的面积",
+        "duration": 7.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 11.0,
+        "steps": [
+          {
+            "text": "写出原函数",
+            "formula_latex": "\\int x^2\\, dx = \\frac{x^3}{3} + C"
+          },
+          {
+            "text": "代入上下限",
+            "formula_latex": "\\int_0^1 x^2\\, dx = \\left.\\frac{x^3}{3}\\right|_0^1"
+          },
+          {
+            "text": "计算差值",
+            "formula_latex": "= \\frac{1^3}{3} - \\frac{0^3}{3} = \\frac{1}{3}"
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "积分 = 1/3",
+          "几何意义：抛物线与 x 轴在 [0, 1] 围成的面积",
+          "牛顿-莱布尼茨公式：先求原函数再代值"
+        ],
+        "duration": 4.5
+      }
+    }
+  ]
+}

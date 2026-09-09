@@ -1,0 +1,68 @@
+{
+  "title": "方程实根个数：两曲线交点",
+  "problem_type": "intersection_count",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "判断方程 e^x = x + 2 的实根个数",
+        "subtitle": "数形结合",
+        "duration": 3.5
+      }
+    },
+    {
+      "id": 2,
+      "template": "axes_plot",
+      "params": {
+        "x_range": [-3, 3, 1],
+        "y_range": [-1, 6, 1],
+        "functions": [
+          { "expr": "exp(x)", "label": "y = e^x", "color": "BLUE" },
+          { "expr": "x + 2", "label": "y = x + 2", "color": "YELLOW" }
+        ],
+        "caption": "两条曲线的交点个数 = 方程的实根个数",
+        "duration": 7.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 11.0,
+        "steps": [
+          {
+            "text": "构造函数，把方程变成求零点",
+            "formula_latex": "g(x) = e^x - x - 2"
+          },
+          {
+            "text": "求导，找单调性",
+            "formula_latex": "g'(x) = e^x - 1,\\quad g'(0) = 0"
+          },
+          {
+            "text": "取特殊值判断符号",
+            "formula_latex": "g(-2) > 0,\\quad g(0) = -1 < 0,\\quad g(2) > 0"
+          },
+          {
+            "text": "由零点存在定理，有两个零点",
+            "formula_latex": "x_1 \\approx -1.84,\\quad x_2 \\approx 1.15"
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "方程有 2 个实根",
+          "x₁ ≈ -1.84，x₂ ≈ 1.15",
+          "方法：数形结合 + 零点存在定理"
+        ],
+        "duration": 4.5
+      }
+    }
+  ]
+}

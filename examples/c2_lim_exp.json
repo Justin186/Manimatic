@@ -1,0 +1,67 @@
+{
+  "title": "极限：指数函数的泰勒展开",
+  "problem_type": "limit_by_taylor",
+  "scenes": [
+    {
+      "id": 1,
+      "template": "title_card",
+      "params": {
+        "text": "求极限：(e^x - 1 - x) 除以 x^2",
+        "subtitle": "x -> 0",
+        "duration": 3.5
+      }
+    },
+    {
+      "id": 2,
+      "template": "taylor_approx",
+      "params": {
+        "x_range": [-1.2, 1.5, 1],
+        "y_range": [-0.3, 2.0, 0.5],
+        "target_expr": "exp(x) - 1 - x",
+        "target_label": "e^x - 1 - x",
+        "terms": ["x**2/2", "x**3/6"],
+        "caption": "分子在 x = 0 附近主要由 x^2/2 决定",
+        "duration": 10.0
+      }
+    },
+    {
+      "id": 3,
+      "template": "step_card",
+      "params": {
+        "mode": "stack",
+        "duration": 12.0,
+        "steps": [
+          {
+            "text": "把 e^x 展开到三阶",
+            "formula_latex": "e^x = 1 + x + \\frac{x^2}{2} + \\frac{x^3}{6} + O(x^4)"
+          },
+          {
+            "text": "代入分子，1 和 x 被减掉",
+            "formula_latex": "e^x - 1 - x = \\frac{x^2}{2} + \\frac{x^3}{6} + O(x^4)"
+          },
+          {
+            "text": "除以 x^2",
+            "formula_latex": "\\frac{e^x - 1 - x}{x^2} = \\frac{1}{2} + \\frac{x}{6} + O(x^2)"
+          },
+          {
+            "text": "令 x 趋于 0，高阶项消失",
+            "formula_latex": "\\lim_{x \\to 0} \\frac{e^x - 1 - x}{x^2} = \\frac{1}{2}"
+          }
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "template": "summary_card",
+      "params": {
+        "title": "答案",
+        "points": [
+          "极限 = 1/2",
+          "关键：e^x 展开后常数项和一次项恰好被减掉",
+          "剩下最低阶项 x^2/2 决定极限"
+        ],
+        "duration": 4.5
+      }
+    }
+  ]
+}
