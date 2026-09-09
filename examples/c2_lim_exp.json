@@ -6,8 +6,8 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "求极限：(e^x - 1 - x) 除以 x^2",
-        "subtitle": "x -> 0",
+        "text": "求极限：$\\dfrac{e^x - 1 - x}{x^2}$",
+        "subtitle": "$x \\to 0$",
         "duration": 3.5
       }
     },
@@ -15,12 +15,23 @@
       "id": 2,
       "template": "taylor_approx",
       "params": {
-        "x_range": [-1.2, 1.5, 1],
-        "y_range": [-0.3, 2.0, 0.5],
+        "x_range": [
+          -1.2,
+          1.5,
+          1
+        ],
+        "y_range": [
+          -0.3,
+          2.0,
+          0.5
+        ],
         "target_expr": "exp(x) - 1 - x",
         "target_label": "e^x - 1 - x",
-        "terms": ["x**2/2", "x**3/6"],
-        "caption": "分子在 x = 0 附近主要由 x^2/2 决定",
+        "terms": [
+          "x**2/2",
+          "x**3/6"
+        ],
+        "caption": "分子在 $x = 0$ 附近主要由 $\\frac{x^2}{2}$ 决定",
         "duration": 10.0
       }
     },

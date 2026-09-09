@@ -6,8 +6,8 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "求极限：(tan x - sin x) 除以 x^3",
-        "subtitle": "x -> 0",
+        "text": "求极限：$\\dfrac{\\tan x - \\sin x}{x^3}$",
+        "subtitle": "$x \\to 0$",
         "duration": 3.5
       }
     },
@@ -15,12 +15,23 @@
       "id": 2,
       "template": "taylor_approx",
       "params": {
-        "x_range": [-1.3, 1.3, 1],
-        "y_range": [-2.5, 2.5, 1],
+        "x_range": [
+          -1.3,
+          1.3,
+          1
+        ],
+        "y_range": [
+          -2.5,
+          2.5,
+          1
+        ],
         "target_expr": "sin(x)/cos(x)",
         "target_label": "\\tan x",
-        "terms": ["x", "x**3/3"],
-        "caption": "tan x 展开：一次项 x，三次项 x^3/3",
+        "terms": [
+          "x",
+          "x**3/3"
+        ],
+        "caption": "$\\tan x$ 展开：一次项 $x$，三次项 $\\frac{x^3}{3}$",
         "duration": 9.0
       }
     },
@@ -28,12 +39,23 @@
       "id": 3,
       "template": "taylor_approx",
       "params": {
-        "x_range": [-1.3, 1.3, 1],
-        "y_range": [-2.5, 2.5, 1],
+        "x_range": [
+          -1.3,
+          1.3,
+          1
+        ],
+        "y_range": [
+          -2.5,
+          2.5,
+          1
+        ],
         "target_expr": "sin(x)",
         "target_label": "\\sin x",
-        "terms": ["x", "-x**3/6"],
-        "caption": "sin x 展开：一次项 x，三次项 -x^3/6",
+        "terms": [
+          "x",
+          "-x**3/6"
+        ],
+        "caption": "$\\tan x$ 展开：一次项 $x$，三次项 $\\frac{x^3}{3}$",
         "duration": 9.0
       }
     },

@@ -6,7 +6,7 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "用数学归纳法证明：1 + 2 + ... + n = n(n+1)/2",
+        "text": "用数学归纳法证明：$1 + 2 + \\cdots + n = \\frac{n(n+1)}{2}$",
         "subtitle": "归纳法两步走",
         "duration": 3.5
       }

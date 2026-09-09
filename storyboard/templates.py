@@ -15,8 +15,25 @@ Manim 代码模板库 —— 这是整个架构的关键层。
 每个模板函数返回一段会被注入 Scene.construct() 的代码字符串。
 """
 
+
+def esc_text(s):
+    """
+    清洗要嵌入生成代码 raw 三引号字符串的文本字段。
+
+    - 反斜杠【保留】：\\frac 这类 LaTeX 命令靠它活着（本次修复的核心，
+      之前 \\frac 嵌进普通字符串，\\f 被解析成 form feed，画面出现方块+rac）
+    - 三连引号去掉：防止截断 raw 三引号字符串
+    - 控制字符（\\x00-\\x1f）替换为空格：防止任何不可见字符进源码
+    """
+    s = str(s)
+    s = s.replace('"""', '"')
+    s = re.sub(r"[\x00-\x1f]", " ", s)
+    return s
+
 # 模板注册表：大模型只能从这个枚举里选，不能发明新模板
 TEMPLATE_REGISTRY = {}
+
+import re
 
 
 def register(name):
@@ -60,16 +77,16 @@ def _has_cjk(s):
 
 @register("title_card")
 def title_card(params, env):
-    text = str(params.get("text", "")).replace('"', '\\"')
-    subtitle = str(params.get("subtitle", "")).replace('"', '\\"')
+    text = esc_text(params.get("text", ""))
+    subtitle = esc_text(params.get("subtitle", ""))
     duration = float(params.get("duration", 2.0))
 
     lines = []
-    lines.append(f'        title = rich("{text}", font_size=44, color=PRIMARY)')
+    lines.append(f'        title = rich(r"""{text}""", font_size=44, color=PRIMARY)')
     lines.append(f'        title.to_edge(UP, buff=1.2)')
     lines.append(f'        self.play(Write(title), run_time=1.2)')
     if subtitle:
-        lines.append(f'        sub = rich("{subtitle}", font_size=26, color=SECONDARY)')
+        lines.append(f'        sub = rich(r"""{subtitle}""", font_size=26, color=SECONDARY)')
         lines.append(f'        sub.next_to(title, DOWN, buff=0.5)')
         lines.append(f'        self.play(FadeIn(sub), run_time=0.8)')
     lines.append(f'        self.wait({max(duration - 2.0, 0.5)})')
@@ -86,7 +103,7 @@ def axes_plot(params, env):
     xr = params.get("x_range", [-5, 5, 1])
     yr = params.get("y_range", [-2, 10, 2])
     funcs = params.get("functions", [])
-    caption = str(params.get("caption", "")).replace('"', '\\"')
+    caption = esc_text(params.get("caption", ""))
     duration = float(params.get("duration", 3.0))
 
     # 坐标轴刻度数字由 MathTex 渲染，没有 LaTeX 时必须关掉，否则整个渲染崩溃
@@ -101,9 +118,9 @@ def axes_plot(params, env):
     lines.append(f'        self.play(Create(axes), run_time=1.2)')
 
     for i, fn in enumerate(funcs):
-        expr = str(fn.get("expr", "x")).replace('"', '\\"')
+        expr = str(fn.get("expr", "x"))
         color = str(fn.get("color", "BLUE")).upper()
-        label = str(fn.get("label", "")).replace('"', '\\"')
+        label = esc_text(fn.get("label", ""))
         vname = f"g{i}"
         lines.append(f'        {vname} = axes.plot(lambda x: _eval_expr("{expr}", x), color={color}, x_range=[{xr[0]}, {xr[1]}])')
         lines.append(f'        self.play(Create({vname}), run_time=1.5)')
@@ -113,7 +130,7 @@ def axes_plot(params, env):
             lines.append(f'        self.play(FadeIn(lbl{i}), run_time=0.6)')
 
     if caption:
-        lines.append(f'        cap = rich("{caption}", font_size=24, color=WHITE)')
+        lines.append(f'        cap = rich(r"""{caption}""", font_size=24, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.5)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -130,11 +147,11 @@ def axes_plot(params, env):
 def function_transform(params, env):
     xr = params.get("x_range", [-5, 5, 1])
     yr = params.get("y_range", [-2, 10, 2])
-    from_expr = str(params.get("from_expr", "x")).replace('"', '\\"')
-    to_expr = str(params.get("to_expr", "x")).replace('"', '\\"')
-    from_label = str(params.get("from_label", "")).replace('"', '\\"')
-    to_label = str(params.get("to_label", "")).replace('"', '\\"')
-    caption = str(params.get("caption", "")).replace('"', '\\"')
+    from_expr = str(params.get("from_expr", "x"))
+    to_expr = str(params.get("to_expr", "x"))
+    from_label = esc_text(params.get("from_label", ""))
+    to_label = esc_text(params.get("to_label", ""))
+    caption = esc_text(params.get("caption", ""))
     duration = float(params.get("duration", 4.0))
 
     # 同上：没有 LaTeX 时关掉刻度数字
@@ -165,7 +182,7 @@ def function_transform(params, env):
         lines.append(f'        self.play(Transform(l0, l1), run_time=1.0)')
 
     if caption:
-        lines.append(f'        cap = rich("{caption}", font_size=24, color=WHITE)')
+        lines.append(f'        cap = rich(r"""{caption}""", font_size=24, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.5)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -180,19 +197,19 @@ def function_transform(params, env):
 
 @register("summary_card")
 def summary_card(params, env):
-    title = str(params.get("title", "小结")).replace('"', '\\"')
+    title = esc_text(params.get("title", "小结"))
     points = params.get("points", [])
     duration = float(params.get("duration", 3.0))
 
     lines = []
-    lines.append(f'        head = rich("{title}", font_size=38, color=ACCENT)')
+    lines.append(f'        head = rich(r"""{title}""", font_size=38, color=ACCENT)')
     lines.append(f'        head.to_edge(UP, buff=1.0)')
     lines.append(f'        self.play(Write(head), run_time=1.0)')
 
     lines.append(f'        items = VGroup()')
     for p in points:
-        p = str(p).replace('"', '\\"')
-        lines.append(f'        items.add(rich("{p}", font_size=26, color=WHITE))')
+        p = esc_text(p)
+        lines.append(f'        items.add(rich(r"""{p}""", font_size=26, color=WHITE))')
     lines.append(f'        items.arrange(DOWN, aligned_edge=LEFT, buff=0.35)')
     lines.append(f'        items.next_to(head, DOWN, buff=0.6).to_edge(LEFT, buff=1.5)')
     lines.append(f'        for it in items:')
@@ -229,7 +246,7 @@ def vector_wave(params, env):
     """
     radius = float(params.get("radius", 1.3))
     duration = float(params.get("duration", 7.0))
-    caption = str(params.get("caption", "")).replace('"', '\\"')
+    caption = esc_text(params.get("caption", ""))
     inc_numbers = "True" if env.get("use_latex", True) else "False"
 
     lines = []
@@ -257,7 +274,7 @@ def vector_wave(params, env):
     lines.append(f'        self.add(dot, rline, hline, curve)')
 
     if caption:
-        lines.append(f'        cap = rich("{caption}", font_size=24, color=WHITE)')
+        lines.append(f'        cap = rich(r"""{caption}""", font_size=24, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.5)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -284,7 +301,7 @@ def series_approx(params, env):
     yr = params.get("y_range", [-1.8, 1.8, 1])
     terms = [int(t) for t in params.get("terms", [1, 3, 5, 7, 9, 11])]
     series = str(params.get("series", "square")).lower()
-    caption = str(params.get("caption", "")).replace('"', '\\"')
+    caption = esc_text(params.get("caption", ""))
     duration = float(params.get("duration", 8.0))
     inc_numbers = "True" if env.get("use_latex", True) else "False"
 
@@ -325,7 +342,7 @@ def series_approx(params, env):
         lines.append(f'        prev = c{i}')
 
     if caption:
-        lines.append(f'        cap = rich("{caption}", font_size=24, color=WHITE)')
+        lines.append(f'        cap = rich(r"""{caption}""", font_size=24, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.5)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -351,7 +368,7 @@ def taylor_approx(params, env):
     yr = params.get("y_range", [-2.5, 2.5, 1])
     target = str(params.get("target_expr", "sin(x)"))
     terms = [str(t) for t in params.get("terms", ["x"])]
-    caption = str(params.get("caption", "")).replace('"', '\\"')
+    caption = esc_text(params.get("caption", ""))
     duration = float(params.get("duration", 8.0))
     inc_numbers = "True" if env.get("use_latex", True) else "False"
 
@@ -395,20 +412,20 @@ def taylor_approx(params, env):
         lines.append(f'        err = _err{i}')
 
     if caption:
-        lines.append(f'        cap = rich("{caption}", font_size=23, color=WHITE)')
+        lines.append(f'        cap = rich(r"""{caption}""", font_size=23, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.45)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
     # 图例：右上角，"目标函数 + 各阶泰勒多项式"
     lines.append(f'        legend_items = VGroup()')
     lines.append(f'        _l0 = Line(LEFT * 0.18, RIGHT * 0.18, color=WHITE, stroke_width=2.5).set_opacity(0.55)')
-    lines.append(f'        _l0_label = Text("f(x) = {target}", font_size=16, font=CN_FONT, color=WHITE).next_to(_l0, RIGHT, buff=0.12)')
+    lines.append(f'        _l0_label = Text(r"""f(x) = {target}""", font_size=16, font=CN_FONT, color=WHITE).next_to(_l0, RIGHT, buff=0.12)')
     lines.append(f'        legend_items.add(VGroup(_l0, _l0_label))')
     for i, t in enumerate(terms):
         col = _hex_lerp("#58C4DD", "#FFFF00", i / max(len(terms) - 1, 1))
         _seg_lbl_str = "T_{" + str(i + 1) + "}=" + t
         lines.append(f'        _seg = Line(LEFT * 0.18, RIGHT * 0.18, color="{col}", stroke_width=2.2)')
-        lines.append(f'        _seg_lbl = Text("{_seg_lbl_str}", font_size=16, font=CN_FONT, color=WHITE).next_to(_seg, RIGHT, buff=0.12)')
+        lines.append(f'        _seg_lbl = Text(r"""{_seg_lbl_str}""", font_size=16, font=CN_FONT, color=WHITE).next_to(_seg, RIGHT, buff=0.12)')
         lines.append(f'        legend_items.add(VGroup(_seg, _seg_lbl))')
     lines.append(f'        legend_items.arrange(DOWN, aligned_edge=LEFT, buff=0.14).to_corner(UR, buff=0.45).scale(0.95)')
     lines.append(f'        self.play(FadeIn(legend_items), run_time=0.5)')
@@ -435,7 +452,7 @@ def area_under_curve(params, env):
     expr = str(params.get("expr", "sin(x)"))
     a = float(params.get("a", 0.0))
     b = float(params.get("b", 1.0))
-    caption = str(params.get("caption", "")).replace('"', '\\"')
+    caption = esc_text(params.get("caption", ""))
     duration = float(params.get("duration", 6.0))
     inc_numbers = "True" if env.get("use_latex", True) else "False"
 
@@ -478,7 +495,7 @@ def area_under_curve(params, env):
     lines.append(f'        self.play(area.animate.set_opacity(0.42), run_time=0.5)')
 
     if caption:
-        lines.append(f'        cap = rich("{caption}", font_size=23, color=WHITE)')
+        lines.append(f'        cap = rich(r"""{caption}""", font_size=23, color=WHITE)')
         lines.append(f'        cap.to_edge(UP, buff=0.45)')
         lines.append(f'        self.play(Write(cap), run_time=0.8)')
 
@@ -519,10 +536,10 @@ def step_card(params, env):
         # 翻页模式：保留旧行为，每步清掉上一步
         lines.append("        prev_grp = None")
         for i, st in enumerate(steps):
-            text = str(st.get("text", "")).replace('"', '\\"')
-            formula = str(st.get("formula_latex", "")).replace('"', '\\"')
+            text = esc_text(st.get("text", ""))
+            formula = esc_text(st.get("formula_latex", ""))
             lines.append(f'        grp = VGroup()')
-            lines.append(f'        t = rich("第 {i + 1} 步  {text}", font_size=26, color=WHITE)')
+            lines.append(f'        t = rich(r"""第 {i + 1} 步  {text}""", font_size=26, color=WHITE)')
             lines.append(f'        t.to_edge(UP, buff=1.0).to_edge(LEFT, buff=1.0)')
             lines.append(f'        grp.add(t)')
             if formula:
@@ -571,15 +588,15 @@ def step_card(params, env):
     lines = ["        _items = VGroup()"]
     y_cursor = FRAME_TOP
     for i, st in enumerate(steps):
-        text = str(st.get("text", "")).replace('"', '\\"')
-        formula = str(st.get("formula_latex", "")).replace('"', '\\"')
+        text = esc_text(st.get("text", ""))
+        formula = esc_text(st.get("formula_latex", ""))
         g = f"_grp{i}"
 
         h = slot_h(st) * scale
         cy = y_cursor - h / 2.0      # 该槽位的中心 y
         y_cursor -= h                # 光标下移，为下一步留位 → 天然不重叠
 
-        lines.append(f'        _t{i} = rich("第 {i + 1} 步  {text}", font_size={fs_t}, color=WHITE)')
+        lines.append(f'        _t{i} = rich(r"""第 {i + 1} 步  {text}""", font_size={fs_t}, color=WHITE)')
         lines.append(f'        {g} = VGroup(_t{i})')
         if formula:
             lines.append(f'        _f{i} = {env["formula"]}(r"""{formula}""", font_size={fs_f}, color=ACCENT)')

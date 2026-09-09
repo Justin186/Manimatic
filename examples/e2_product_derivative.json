@@ -6,7 +6,7 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "求导：x^2 乘以 ln x",
+        "text": "求导：$x^2 \\cdot \\ln x$",
         "subtitle": "乘积法则",
         "duration": 3.0
       }

@@ -180,7 +180,7 @@ def validate(storyboard: dict, registry: dict) -> dict:
             for st in steps:
                 if not isinstance(st, dict) or "text" not in st:
                     raise SchemaError(f"scene {sid}: 每个步骤需要 text 字段")
-                st["text"] = str(st["text"])[:50]
+                st["text"] = str(st["text"])[:150]
                 # formula_latex 不允许中文（和 label 一样的原因）
                 st["formula_latex"] = _check_label(
                     str(st.get("formula_latex", "")), sid, "steps[].formula_latex"
@@ -249,7 +249,7 @@ def validate(storyboard: dict, registry: dict) -> dict:
         # 文本长度限制（防止溢出画面 —— 这是静默失败的主要来源之一）
         for key in ("text", "subtitle", "caption", "title"):
             if key in params:
-                params[key] = str(params[key])[:60]
+                params[key] = str(params[key])[:150]
 
         if "points" in params:
             pts = params["points"]
@@ -257,7 +257,7 @@ def validate(storyboard: dict, registry: dict) -> dict:
                 raise SchemaError(f"scene {sid}: points 不能为空")
             if len(pts) > 5:
                 raise SchemaError(f"scene {sid}: 要点最多 5 条，当前 {len(pts)}")
-            params["points"] = [str(p)[:50] for p in pts]
+            params["points"] = [str(p)[:150] for p in pts]
 
         out["scenes"].append({
             "id": sid,

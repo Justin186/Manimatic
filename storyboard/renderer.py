@@ -113,14 +113,14 @@ class StoryboardScene(Scene):
 
 def render(storyboard: dict,
            use_latex: bool = True,
-           cn_font: str = "SimSun") -> str:
+           cn_font: str = "Source Han Serif CN") -> str:
     """
     把校验过的分镜 JSON 渲染成 Manim Python 源码。
 
     Args:
         storyboard: 已经过 schema.validate() 的分镜 dict
         use_latex: 是否用 LaTeX 渲染公式（没装 LaTeX 时传 False）
-        cn_font: 中文字体（宋体 SimSun / 楷体 KaiTi / 微软雅黑 Microsoft YaHei）
+        cn_font: 中文字体（思源宋体 Source Han Serif CN / 楷体 KaiTi / 雅黑 Microsoft YaHei）
 
     Returns:
         Manim 场景源码字符串

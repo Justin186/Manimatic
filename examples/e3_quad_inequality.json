@@ -6,7 +6,7 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "解不等式：x^2 - 5x + 6 < 0",
+        "text": "解不等式：$x^2 - 5x + 6 < 0$",
         "subtitle": "因式分解法",
         "duration": 3.0
       }
@@ -15,10 +15,22 @@
       "id": 2,
       "template": "axes_plot",
       "params": {
-        "x_range": [-1, 5, 1],
-        "y_range": [-1.5, 3, 1],
+        "x_range": [
+          -1,
+          5,
+          1
+        ],
+        "y_range": [
+          -1.5,
+          3,
+          1
+        ],
         "functions": [
-          { "expr": "x**2 - 5*x + 6", "label": "y = x^2 - 5x + 6", "color": "BLUE" }
+          {
+            "expr": "x**2 - 5*x + 6",
+            "label": "y = x^2 - 5x + 6",
+            "color": "BLUE"
+          }
         ],
         "caption": "小于 0，就是找图像在 x 轴下方的部分",
         "duration": 6.0

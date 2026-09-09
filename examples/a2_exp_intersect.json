@@ -6,7 +6,7 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "判断方程 e^x = x + 2 的实根个数",
+        "text": "判断方程 $e^x = x + 2$ 的实根个数",
         "subtitle": "数形结合",
         "duration": 3.5
       }
@@ -15,11 +15,27 @@
       "id": 2,
       "template": "axes_plot",
       "params": {
-        "x_range": [-3, 3, 1],
-        "y_range": [-1, 6, 1],
+        "x_range": [
+          -3,
+          3,
+          1
+        ],
+        "y_range": [
+          -1,
+          6,
+          1
+        ],
         "functions": [
-          { "expr": "exp(x)", "label": "y = e^x", "color": "BLUE" },
-          { "expr": "x + 2", "label": "y = x + 2", "color": "YELLOW" }
+          {
+            "expr": "exp(x)",
+            "label": "y = e^x",
+            "color": "BLUE"
+          },
+          {
+            "expr": "x + 2",
+            "label": "y = x + 2",
+            "color": "YELLOW"
+          }
         ],
         "caption": "两条曲线的交点个数 = 方程的实根个数",
         "duration": 7.0

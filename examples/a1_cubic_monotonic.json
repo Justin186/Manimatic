@@ -6,7 +6,7 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "求 f(x) = x^3 - 3x 的单调区间与极值",
+        "text": "求 $f(x) = x^3 - 3x$ 的单调区间与极值",
         "subtitle": "导数工具",
         "duration": 3.5
       }
@@ -15,12 +15,24 @@
       "id": 2,
       "template": "axes_plot",
       "params": {
-        "x_range": [-2.5, 2.5, 1],
-        "y_range": [-4, 4, 1],
-        "functions": [
-          { "expr": "x**3 - 3*x", "label": "f(x) = x^3 - 3x", "color": "BLUE" }
+        "x_range": [
+          -2.5,
+          2.5,
+          1
         ],
-        "caption": "先画出 f(x) = x^3 - 3x 的图像",
+        "y_range": [
+          -4,
+          4,
+          1
+        ],
+        "functions": [
+          {
+            "expr": "x**3 - 3*x",
+            "label": "f(x) = x^3 - 3x",
+            "color": "BLUE"
+          }
+        ],
+        "caption": "先画出 $f(x) = x^3 - 3x$ 的图像",
         "duration": 6.0
       }
     },

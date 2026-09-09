@@ -6,7 +6,7 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "y = 2^x 经过怎样的变换得到 y = 2^(-x+1) - 1",
+        "text": "$y = 2^x$ 经过怎样的变换得到 $y = 2^{-x+1} - 1$",
         "subtitle": "翻折加平移",
         "duration": 3.5
       }
@@ -15,8 +15,16 @@
       "id": 2,
       "template": "function_transform",
       "params": {
-        "x_range": [-3, 4, 1],
-        "y_range": [-2, 8, 1],
+        "x_range": [
+          -3,
+          4,
+          1
+        ],
+        "y_range": [
+          -2,
+          8,
+          1
+        ],
         "from_expr": "2**x",
         "to_expr": "2**(-x+1) - 1",
         "from_label": "y = 2^x",

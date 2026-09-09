@@ -33,8 +33,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="只生成代码，不渲染")
     ap.add_argument("--no-latex", action="store_true", help="强制不用 LaTeX")
     ap.add_argument("--keep-code", action="store_true", help="保留生成的 .py 文件")
-    ap.add_argument("--font", default="SimSun",
-                    help="中文字体（SimSun=宋体 / KaiTi=楷体 / Microsoft YaHei=雅黑）")
+    ap.add_argument("--font", default="Source Han Serif CN",
+                    help="中文字体（Source Han Serif CN=思源宋体 / KaiTi=楷体 / Microsoft YaHei=雅黑）")
     args = ap.parse_args()
 
     # ---------- 1. 读取 ----------

@@ -6,7 +6,7 @@
       "id": 1,
       "template": "title_card",
       "params": {
-        "text": "求 y = sin x 在 [0, pi] 与 x 轴围成的面积",
+        "text": "求 $y = \\sin x$ 在 $[0, \\pi]$ 与 $x$ 轴围成的面积",
         "subtitle": "半波面积",
         "duration": 3.5
       }
@@ -15,8 +15,16 @@
       "id": 2,
       "template": "area_under_curve",
       "params": {
-        "x_range": [-0.5, 3.7, 1],
-        "y_range": [-0.3, 1.3, 0.5],
+        "x_range": [
+          -0.5,
+          3.7,
+          1
+        ],
+        "y_range": [
+          -0.3,
+          1.3,
+          0.5
+        ],
         "expr": "sin(x)",
         "a": 0.0,
         "b": 3.1415926,
