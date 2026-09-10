@@ -1,0 +1,224 @@
+{
+  "title": "导数的几何意义：切线斜率",
+  "problem_type": "derivative_geometry",
+
+  "_note": "这是 v2（元素 + 时间线）写法。旧写法是选一个固定模板，这里是自己配：想要几个元素就要几个，想按什么顺序动就按什么顺序动。",
+
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 4.5,
+      "elements": [
+        {
+          "id": "h",
+          "kind": "text",
+          "content": "导数的几何意义",
+          "font_size": 46,
+          "color": "PRIMARY",
+          "place": [{ "edge": "up", "buff": 1.7 }]
+        },
+        {
+          "id": "sub",
+          "kind": "text",
+          "content": "函数在某一点的导数 = 该点切线的斜率",
+          "font_size": 26,
+          "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "h", "direction": "down", "buff": 0.45 } }]
+        },
+        {
+          "id": "bar",
+          "kind": "line",
+          "start": [-2.4, 0],
+          "end": [2.4, 0],
+          "color": "ACCENT",
+          "stroke_width": 2,
+          "place": [{ "next_to": { "of": "sub", "direction": "down", "buff": 0.45 } }]
+        }
+      ],
+      "timeline": [
+        { "do": "write", "target": "h", "run_time": 1.3 },
+        { "do": "fade_in", "target": "sub", "run_time": 0.7 },
+        { "do": "grow", "target": "bar", "from": "left", "run_time": 0.6 },
+        { "do": "wait", "time": 1.2 }
+      ]
+    },
+
+    {
+      "id": 2,
+      "duration": 13.0,
+      "_note": "核心场景：一个 tracker 同时驱动动点、切线和斜率数字 —— 旧模板做不到这种联动",
+      "elements": [
+        {
+          "id": "ax",
+          "kind": "axes",
+          "x_range": [-1.5, 3.5, 1],
+          "y_range": [-1, 8, 1],
+          "x_length": 9.2,
+          "y_length": 5.0,
+          "place": [{ "edge": "down", "buff": 0.8 }]
+        },
+        { "id": "t", "kind": "tracker", "value": -1.0 },
+        {
+          "id": "g",
+          "kind": "plot",
+          "axes": "ax",
+          "expr": "x**2",
+          "color": "PRIMARY",
+          "stroke_width": 4
+        },
+        {
+          "id": "p",
+          "kind": "dot",
+          "at": { "ref": "ax", "x": "$t", "y": "t**2" },
+          "color": "YELLOW",
+          "radius": 0.11
+        },
+        {
+          "id": "tangent",
+          "kind": "line",
+          "start": { "ref": "ax", "x": "$t - 1.1", "y": "t**2 - 2*t*1.1" },
+          "end": { "ref": "ax", "x": "$t + 1.1", "y": "t**2 + 2*t*1.1" },
+          "color": "RED",
+          "stroke_width": 3.5
+        },
+        {
+          "id": "ring",
+          "kind": "highlight",
+          "of": "p",
+          "color": "ACCENT",
+          "buff": 0.16,
+          "radius": 0.14,
+          "live": true
+        },
+        {
+          "id": "kval",
+          "kind": "number",
+          "value": "2*t",
+          "decimals": 2,
+          "font_size": 40,
+          "color": "ACCENT",
+          "place": [{ "corner": "ur", "buff": 0.9 }]
+        },
+        {
+          "id": "kname",
+          "kind": "text",
+          "content": "切线斜率 $k = 2x_0$",
+          "font_size": 24,
+          "color": "WHITE",
+          "place": [{ "next_to": { "of": "kval", "direction": "down", "buff": 0.3, "aligned": "right" } }]
+        },
+        {
+          "id": "lg",
+          "kind": "legend",
+          "items": [["#58C4DD", "$y = x^2$"], ["RED", "切线"]],
+          "font_size": 20,
+          "place": [{ "corner": "dr", "buff": 0.7 }]
+        },
+        {
+          "id": "cap",
+          "kind": "text",
+          "content": "让切点从 $x=-1$ 滑到 $x=3$，看斜率怎么变",
+          "font_size": 24,
+          "color": "WHITE",
+          "place": [{ "edge": "up", "buff": 0.45 }]
+        }
+      ],
+      "timeline": [
+        { "do": "create", "target": "ax", "run_time": 1.0 },
+        { "do": "create", "target": "g", "run_time": 1.6 },
+        { "do": "write", "target": "cap", "run_time": 0.9 },
+        { "do": "show", "target": ["p", "tangent", "ring", "kval"] },
+        { "do": "fade_in", "target": ["kname", "lg"], "run_time": 0.6 },
+        {
+          "do": "tracker_to",
+          "target": "t",
+          "to": 3.0,
+          "run_time": 7.5,
+          "rate_func": "smooth"
+        },
+        { "do": "indicate", "target": "kval", "run_time": 1.0 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+
+    {
+      "id": 3,
+      "duration": 10.0,
+      "_note": "板书：四个元素逐个落下，最后用一个强调框圈出关键一步",
+      "elements": [
+        {
+          "id": "l1",
+          "kind": "text",
+          "content": "设切点为 $(x_0,\\, x_0^2)$",
+          "font_size": 30,
+          "place": [{ "corner": "ul", "buff": 1.0 }]
+        },
+        {
+          "id": "l2",
+          "kind": "formula",
+          "content": "k = \\lim_{h \\to 0} \\frac{(x_0+h)^2 - x_0^2}{h}",
+          "font_size": 34,
+          "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l1", "direction": "down", "buff": 0.55, "aligned": "left" } }]
+        },
+        {
+          "id": "l3",
+          "kind": "formula",
+          "content": "= \\lim_{h \\to 0}\\,(2x_0 + h) = 2x_0",
+          "font_size": 34,
+          "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l2", "direction": "down", "buff": 0.45, "aligned": "left" } }]
+        },
+        {
+          "id": "l4",
+          "kind": "text",
+          "content": "所以 $y = x^2$ 在任意点的导数都是 $2x$",
+          "font_size": 27,
+          "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l3", "direction": "down", "buff": 0.65, "aligned": "left" } }]
+        },
+        { "id": "box", "kind": "highlight", "of": "l3", "color": "ACCENT", "buff": 0.22 }
+      ],
+      "timeline": [
+        { "do": "write", "target": "l1", "run_time": 1.2 },
+        { "do": "write", "target": "l2", "run_time": 2.0 },
+        { "do": "write", "target": "l3", "run_time": 1.6 },
+        { "do": "fade_in", "target": "l4", "run_time": 0.9 },
+        { "do": "create", "target": "box", "run_time": 0.7 },
+        { "do": "wait", "time": 1.6 }
+      ]
+    },
+
+    {
+      "id": 4,
+      "duration": 6.0,
+      "elements": [
+        {
+          "id": "th",
+          "kind": "text",
+          "content": "记住三句话",
+          "font_size": 38,
+          "color": "PRIMARY",
+          "place": [{ "edge": "up", "buff": 1.3 }]
+        },
+        { "id": "a", "kind": "text", "content": "导数是切线的斜率，是一个数", "font_size": 27 },
+        { "id": "b", "kind": "text", "content": "$f'(x_0)$ 描述的是「这一点的变化快慢」", "font_size": 27 },
+        { "id": "c", "kind": "text", "content": "$k>0$ 上升，$k<0$ 下降，$k=0$ 是极值候选", "font_size": 27, "color": "SECONDARY" },
+        {
+          "id": "grp",
+          "kind": "group",
+          "items": ["a", "b", "c"],
+          "direction": "down",
+          "buff": 0.55,
+          "aligned": "left",
+          "place": [{ "next_to": { "of": "th", "direction": "down", "buff": 0.8 } }]
+        }
+      ],
+      "timeline": [
+        { "do": "write", "target": "th", "run_time": 1.0 },
+        { "do": "write", "target": "grp", "run_time": 2.6, "lag_ratio": 0.5 },
+        { "do": "wait", "time": 1.4 }
+      ]
+    }
+  ]
+}

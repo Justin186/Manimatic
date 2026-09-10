@@ -1,0 +1,244 @@
+{
+  "title": "求导：f(x) = (x²+1)·e^(2x)",
+  "problem_type": "derivative_product_rule",
+
+  "_note": "详细讲解版：每一步旁边都标出「这一步用的是哪条法则」。旧模板做不出这种密度——它只能给一个 step_card 把步骤堆上去，没法在每行右侧挂法则标签、也没法用高亮框圈出关键一步。",
+
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 5.0,
+      "elements": [
+        { "id": "h", "kind": "text", "content": "求 $f(x) = (x^2+1)\\,e^{2x}$ 的导数", "font_size": 38, "color": "PRIMARY",
+          "place": [{ "edge": "up", "buff": 1.4 }] },
+        { "id": "sub", "kind": "text", "content": "两个函数相乘 —— 用乘法法则", "font_size": 26, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "h", "direction": "down", "buff": 0.5 } }] },
+        { "id": "note", "kind": "text", "content": "思路：先拆成 $u\\cdot v$，分别求导，再代回公式", "font_size": 23, "color": "WHITE",
+          "place": [{ "next_to": { "of": "sub", "direction": "down", "buff": 0.45 } }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "h", "run_time": 1.6 },
+        { "do": "fade_in", "target": "sub", "run_time": 0.8 },
+        { "do": "fade_in", "target": "note", "run_time": 0.9 },
+        { "do": "wait", "time": 1.2 }
+      ]
+    },
+
+    {
+      "id": 2,
+      "duration": 7.0,
+      "_note": "拆因式：明确 u 和 v 分别是谁",
+      "elements": [
+        { "id": "t", "kind": "text", "content": "第 1 步  拆成两个因式", "font_size": 28, "color": "PRIMARY",
+          "place": [{ "corner": "ul", "buff": 1.0 }] },
+        { "id": "l1", "kind": "formula", "content": "f(x) = \\underbrace{(x^2+1)}_{u}\\ \\cdot\\ \\underbrace{e^{2x}}_{v}", "font_size": 34, "color": "WHITE",
+          "place": [{ "next_to": { "of": "t", "direction": "down", "buff": 0.6, "aligned": "left" } }] },
+        { "id": "l2", "kind": "formula", "content": "u = x^2 + 1", "font_size": 32, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l1", "direction": "down", "buff": 0.5, "aligned": "left" } }] },
+        { "id": "r2", "kind": "text", "content": "多项式", "font_size": 21, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l2", "direction": "right", "buff": 0.5 } }] },
+        { "id": "l3", "kind": "formula", "content": "v = e^{2x}", "font_size": 32, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l2", "direction": "down", "buff": 0.45, "aligned": "left" } }] },
+        { "id": "r3", "kind": "text", "content": "复合函数（要链式法则）", "font_size": 21, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l3", "direction": "right", "buff": 0.5 } }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "t", "run_time": 1.0 },
+        { "do": "write", "target": "l1", "run_time": 1.8 },
+        { "do": "write", "target": "l2", "run_time": 1.0 },
+        { "do": "fade_in", "target": "r2", "run_time": 0.5 },
+        { "do": "write", "target": "l3", "run_time": 1.0 },
+        { "do": "fade_in", "target": "r3", "run_time": 0.6 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+
+    {
+      "id": 3,
+      "duration": 7.5,
+      "_note": "法则卡片：先把要用的公式亮出来，再往里代",
+      "elements": [
+        { "id": "cap", "kind": "text", "content": "第 2 步  写出要用的法则", "font_size": 28, "color": "PRIMARY",
+          "place": [{ "corner": "ul", "buff": 1.0 }] },
+        { "id": "rule", "kind": "formula", "content": "(uv)' = u'v + uv'", "font_size": 46, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "cap", "direction": "down", "buff": 0.8, "aligned": "left" } }] },
+        { "id": "box", "kind": "highlight", "of": "rule", "color": "ACCENT", "buff": 0.3, "radius": 0.15 },
+        { "id": "cn", "kind": "text", "content": "「前导后不导  ＋  前不导后导」", "font_size": 26, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "rule", "direction": "down", "buff": 0.7, "aligned": "left" } }] },
+        { "id": "warn", "kind": "text", "content": "注意：$(uv)' \\neq u'v'$  —— 这是最常见的错法", "font_size": 23, "color": "RED",
+          "place": [{ "next_to": { "of": "cn", "direction": "down", "buff": 0.6, "aligned": "left" } }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "write", "target": "rule", "run_time": 1.8 },
+        { "do": "create", "target": "box", "run_time": 0.7 },
+        { "do": "fade_in", "target": "cn", "run_time": 0.9 },
+        { "do": "write", "target": "warn", "run_time": 1.3 },
+        { "do": "indicate", "target": "warn", "run_time": 1.0, "color": "RED" },
+        { "do": "wait", "time": 0.8 }
+      ]
+    },
+
+    {
+      "id": 4,
+      "duration": 11.0,
+      "_note": "求 u'：一行一行写，每行右侧标出用的法则",
+      "elements": [
+        { "id": "t", "kind": "text", "content": "第 3 步  求 $u'$", "font_size": 28, "color": "PRIMARY",
+          "place": [{ "corner": "ul", "buff": 1.0 }] },
+        { "id": "l1", "kind": "formula", "content": "u = x^2 + 1", "font_size": 32, "color": "WHITE",
+          "place": [{ "next_to": { "of": "t", "direction": "down", "buff": 0.55, "aligned": "left" } }] },
+        { "id": "l2", "kind": "formula", "content": "u' = (x^2)' + (1)'", "font_size": 32, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l1", "direction": "down", "buff": 0.42, "aligned": "left" } }] },
+        { "id": "r2", "kind": "text", "content": "和的导数法则", "font_size": 21, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l2", "direction": "right", "buff": 0.45 } }] },
+        { "id": "l3", "kind": "formula", "content": "= 2x^{2-1} + 0", "font_size": 32, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l2", "direction": "down", "buff": 0.42, "aligned": "left" } }] },
+        { "id": "r3", "kind": "text", "content": "幂法则 $(x^n)'=nx^{n-1}$，常数法则", "font_size": 21, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l3", "direction": "right", "buff": 0.45 } }] },
+        { "id": "l4", "kind": "formula", "content": "= 2x", "font_size": 36, "color": "GOLD",
+          "place": [{ "next_to": { "of": "l3", "direction": "down", "buff": 0.5, "aligned": "left" } }] },
+        { "id": "box", "kind": "highlight", "of": "l4", "color": "GOLD", "buff": 0.22 }
+      ],
+      "timeline": [
+        { "do": "write", "target": "t", "run_time": 0.9 },
+        { "do": "write", "target": "l1", "run_time": 0.9 },
+        { "do": "write", "target": "l2", "run_time": 1.5 },
+        { "do": "fade_in", "target": "r2", "run_time": 0.6 },
+        { "do": "write", "target": "l3", "run_time": 1.6 },
+        { "do": "fade_in", "target": "r3", "run_time": 0.7 },
+        { "do": "write", "target": "l4", "run_time": 1.1 },
+        { "do": "create", "target": "box", "run_time": 0.7 },
+        { "do": "wait", "time": 1.4 }
+      ]
+    },
+
+    {
+      "id": 5,
+      "duration": 12.0,
+      "_note": "求 v'：重点是拆外层/内层，把链式法则讲透",
+      "elements": [
+        { "id": "t", "kind": "text", "content": "第 4 步  求 $v'$（本题唯一的难点）", "font_size": 28, "color": "PRIMARY",
+          "place": [{ "corner": "ul", "buff": 1.0 }] },
+        { "id": "l1", "kind": "formula", "content": "v = e^{2x}", "font_size": 32, "color": "WHITE",
+          "place": [{ "next_to": { "of": "t", "direction": "down", "buff": 0.55, "aligned": "left" } }] },
+        { "id": "l2", "kind": "text", "content": "外层 $e^{\\square}$，内层 $\\square = 2x$", "font_size": 24, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l1", "direction": "down", "buff": 0.42, "aligned": "left" } }] },
+        { "id": "rule", "kind": "formula", "content": "\\left[e^{g(x)}\\right]' = e^{g(x)}\\cdot g'(x)", "font_size": 30, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l2", "direction": "down", "buff": 0.5, "aligned": "left" } }] },
+        { "id": "rrule", "kind": "text", "content": "链式法则", "font_size": 21, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "rule", "direction": "right", "buff": 0.45 } }] },
+        { "id": "l3", "kind": "formula", "content": "v' = e^{2x}\\cdot (2x)'", "font_size": 32, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "rule", "direction": "down", "buff": 0.5, "aligned": "left" } }] },
+        { "id": "l4", "kind": "formula", "content": "= e^{2x}\\cdot 2", "font_size": 32, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l3", "direction": "down", "buff": 0.42, "aligned": "left" } }] },
+        { "id": "r4", "kind": "text", "content": "$(2x)' = 2$", "font_size": 21, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l4", "direction": "right", "buff": 0.45 } }] },
+        { "id": "l5", "kind": "formula", "content": "= 2e^{2x}", "font_size": 36, "color": "GOLD",
+          "place": [{ "next_to": { "of": "l4", "direction": "down", "buff": 0.5, "aligned": "left" } }] },
+        { "id": "box", "kind": "highlight", "of": "l5", "color": "GOLD", "buff": 0.22 }
+      ],
+      "timeline": [
+        { "do": "write", "target": "t", "run_time": 1.0 },
+        { "do": "write", "target": "l1", "run_time": 0.9 },
+        { "do": "fade_in", "target": "l2", "run_time": 1.0 },
+        { "do": "write", "target": "rule", "run_time": 1.6 },
+        { "do": "fade_in", "target": "rrule", "run_time": 0.5 },
+        { "do": "write", "target": "l3", "run_time": 1.4 },
+        { "do": "write", "target": "l4", "run_time": 1.1 },
+        { "do": "fade_in", "target": "r4", "run_time": 0.5 },
+        { "do": "write", "target": "l5", "run_time": 1.1 },
+        { "do": "create", "target": "box", "run_time": 0.7 },
+        { "do": "wait", "time": 1.2 }
+      ]
+    },
+
+    {
+      "id": 6,
+      "duration": 10.0,
+      "_note": "代回乘法法则：把 u, u', v, v' 填进去",
+      "elements": [
+        { "id": "t", "kind": "text", "content": "第 5 步  代回 $(uv)' = u'v + uv'$", "font_size": 28, "color": "PRIMARY",
+          "place": [{ "corner": "ul", "buff": 1.0 }] },
+        { "id": "l1", "kind": "formula", "content": "f' = u'v + uv'", "font_size": 34, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "t", "direction": "down", "buff": 0.6, "aligned": "left" } }] },
+        { "id": "l2", "kind": "formula", "content": "= (2x)\\cdot e^{2x} + (x^2+1)\\cdot 2e^{2x}", "font_size": 32, "color": "WHITE",
+          "place": [{ "next_to": { "of": "l1", "direction": "down", "buff": 0.5, "aligned": "left" } }] },
+        { "id": "r2", "kind": "text", "content": "代入 $u' = 2x,\\; v' = 2e^{2x}$", "font_size": 21, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l2", "direction": "down", "buff": 0.35, "aligned": "left" } }] },
+        { "id": "done", "kind": "text", "content": "到这里导数已经算出来了，但还要整理", "font_size": 24, "color": "WHITE",
+          "place": [{ "next_to": { "of": "r2", "direction": "down", "buff": 0.55, "aligned": "left" } }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "t", "run_time": 1.0 },
+        { "do": "write", "target": "l1", "run_time": 1.2 },
+        { "do": "write", "target": "l2", "run_time": 2.2 },
+        { "do": "fade_in", "target": "r2", "run_time": 0.7 },
+        { "do": "fade_in", "target": "done", "run_time": 0.9 },
+        { "do": "wait", "time": 1.4 }
+      ]
+    },
+
+    {
+      "id": 7,
+      "duration": 11.0,
+      "_note": "整理：提取公因式",
+      "elements": [
+        { "id": "t", "kind": "text", "content": "第 6 步  提取公因式 $e^{2x}$", "font_size": 28, "color": "PRIMARY",
+          "place": [{ "corner": "ul", "buff": 1.0 }] },
+        { "id": "l1", "kind": "formula", "content": "f' = 2x\\,e^{2x} + 2(x^2+1)e^{2x}", "font_size": 32, "color": "WHITE",
+          "place": [{ "next_to": { "of": "t", "direction": "down", "buff": 0.6, "aligned": "left" } }] },
+        { "id": "l2", "kind": "formula", "content": "= e^{2x}\\left[\\,2x + 2(x^2+1)\\,\\right]", "font_size": 32, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l1", "direction": "down", "buff": 0.5, "aligned": "left" } }] },
+        { "id": "r2", "kind": "text", "content": "两项都有 $e^{2x}$，提出来", "font_size": 21, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l2", "direction": "right", "buff": 0.45 } }] },
+        { "id": "l3", "kind": "formula", "content": "= e^{2x}(2x^2 + 2x + 2)", "font_size": 32, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "l2", "direction": "down", "buff": 0.45, "aligned": "left" } }] },
+        { "id": "l4", "kind": "formula", "content": "= 2e^{2x}(x^2 + x + 1)", "font_size": 40, "color": "GOLD",
+          "place": [{ "next_to": { "of": "l3", "direction": "down", "buff": 0.6, "aligned": "left" } }] },
+        { "id": "box", "kind": "highlight", "of": "l4", "color": "GOLD", "buff": 0.26, "radius": 0.16 },
+        { "id": "fin", "kind": "text", "content": "最终答案", "font_size": 24, "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "l4", "direction": "down", "buff": 0.55, "aligned": "left" } }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "t", "run_time": 1.0 },
+        { "do": "write", "target": "l1", "run_time": 1.5 },
+        { "do": "write", "target": "l2", "run_time": 1.8 },
+        { "do": "fade_in", "target": "r2", "run_time": 0.6 },
+        { "do": "write", "target": "l3", "run_time": 1.5 },
+        { "do": "write", "target": "l4", "run_time": 1.5 },
+        { "do": "create", "target": "box", "run_time": 0.8 },
+        { "do": "fade_in", "target": "fin", "run_time": 0.6 },
+        { "do": "wait", "time": 1.3 }
+      ]
+    },
+
+    {
+      "id": 8,
+      "duration": 8.0,
+      "_note": "收尾：把用过的法则列一张清单，方便复习",
+      "elements": [
+        { "id": "t", "kind": "text", "content": "这道题用到了哪些法则？", "font_size": 34, "color": "PRIMARY",
+          "place": [{ "edge": "up", "buff": 1.3 }] },
+        { "id": "lg", "kind": "legend",
+          "items": [
+            ["ACCENT", "乘法法则  $(uv)' = u'v + uv'$"],
+            ["SECONDARY", "和的导数  $(u+v)' = u' + v'$"],
+            ["SECONDARY", "幂法则  $(x^n)' = n x^{n-1}$"],
+            ["SECONDARY", "常数法则  $C' = 0$"],
+            ["GOLD", "链式法则  $[e^{g}]' = e^{g} g'$"]
+          ],
+          "font_size": 25,
+          "place": [{ "next_to": { "of": "t", "direction": "down", "buff": 0.8 } }] },
+        { "id": "tip", "kind": "text", "content": "看到「乘积 + 复合」，先想乘法法则，再想链式法则", "font_size": 24, "color": "WHITE",
+          "place": [{ "edge": "down", "buff": 0.7 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "t", "run_time": 1.2 },
+        { "do": "fade_in", "target": "lg", "run_time": 1.8, "lag_ratio": 0.5 },
+        { "do": "write", "target": "tip", "run_time": 1.4 },
+        { "do": "wait", "time": 1.4 }
+      ]
+    }
+  ]
+}

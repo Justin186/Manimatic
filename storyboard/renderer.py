@@ -1,20 +1,26 @@
 """
-模板渲染器：分镜 JSON → 可执行的 Manim 代码（确定性翻译）。
+渲染器：分镜 JSON → 可执行的 Manim 源码（确定性翻译）。
 
-这是「方案 B」的核心：大模型不碰代码，只产出受约束的 JSON，
-由这里的代码把它翻译成 Manim 场景。
-因此语法错误为 0、版本冲突为 0、布局由模板保证。
+两条路径，共用同一个 header 与同一套运行时 helper：
+
+    v1 模板路径  templates.py 里的固定模板  —— 兼容旧分镜
+    v2 DSL 路径  dsl.py 的元素+时间线       —— 推荐，组合空间无限
+
+无论哪条路径，**代码都由 Python 生成，大模型碰不到一个字符**。
+这是 PROJECT_KNOWLEDGE 决策 1 的底线，本次重构没有动它 ——
+变的只是"大模型能表达多少种组合"，不是"大模型能不能写代码"。
 """
 
 import os
 from . import templates
+from . import dsl
 from . import latex_env
 
 HEADER = '''# -*- coding: utf-8 -*-
 """
 自动生成的 Manim 场景 —— 请勿手工编辑。
 来源分镜：{title}
-模板渲染器生成，语法由模板保证。
+由渲染器确定性生成：语法由代码保证，不经过大模型。
 """
 from manim import *
 
@@ -27,82 +33,8 @@ CN_FONT   = "{cn_font}"
 
 USE_LATEX = {use_latex}
 
-{template_helper}
-
-def formula(s, **kw):
-    """
-    公式渲染：三级分流，避免渲染崩溃并最大化表现力。
-
-    1. 纯 LaTeX（无中文）→ MathTex：快（dvi 路线），适合绝大多数公式
-    2. 含中文           → Tex + ctex 模板：走 xelatex，公式里可以直接嵌中文
-                          （如 \\text{{顶点}}(2,0) 不会再显示成原始命令）
-    3. 无 LaTeX 环境     → Text 兜底：保证不崩，公式变纯文本
-
-    ctex 模板来自 Manim 官方 TexTemplateLibrary（见官方文档 using_text.md）。
-    首次编译会触发 MiKTeX 自动安装宏包，可能偏慢（数十秒），之后走缓存。
-    """
-    if not USE_LATEX:
-        return Text(s, font=CN_FONT, **kw)
-    if not _has_cjk(s):
-        return MathTex(s, **kw)
-    try:
-        return Tex(f"${{s}}$", tex_template=TexTemplateLibrary.ctex, **kw)
-    except Exception:
-        # ctex 宏包缺失等编译失败时退回纯文本 —— 响亮失败不如降级可用
-        return Text(s, font=CN_FONT, **kw)
-
-
-def formula_parts(text_parts, **kw):
-    """
-    中英混排公式：把 ["由", "a^2+b^2", "得", "c=5"] 这样的片段
-    拼成一个横向 VGroup，中文走 Text、公式走 MathTex。
-
-    需要真·中英混排时用这个，比 formula() 效果好。
-    """
-    mobs = []
-    for part in text_parts:
-        mobs.append(Text(part, font=CN_FONT, **kw) if _has_cjk(part)
-                    else (MathTex(part, **kw) if USE_LATEX
-                          else Text(part, font=CN_FONT, **kw)))
-    grp = VGroup(*mobs)
-    grp.arrange(RIGHT, buff=0.15)
-    return grp
-
-
-import re as _re_rich
-
-def rich(s, **kw):
-    """
-    行内混排：字符串里用 $...$ 包 LaTeX 公式，其余是中文。
-
-    例：rich("由 $f'(x)=3x^2-3$ 得驻点 $x=\\\\pm 1$")
-    → ["由 ", MathTex("f'(x)=3x^2-3"), " 得驻点 ", MathTex("x=\\\\pm 1")]
-
-    为什么用 $ 分隔符：LLM 写 Markdown 时本来就习惯 $...$ 包公式，
-    不需要额外教学；校验层也容易检查（$ 内禁中文）。
-    """
-    parts = _re_rich.split(r"\$(.+?)\$", s)
-    if len(parts) == 1:
-        return Text(s, font=CN_FONT, **kw)
-    # 同一 font_size 下，LaTeX 字面的视觉尺寸比中文字符小约 25%（x-height 差异），
-    # 不补偿的话混排行里公式明显偏小、视觉不均衡。
-    # 实测 1.3 倍接近中文字面的视觉高度，过大可下调。
-    fs = kw.pop("font_size", 48)
-    mobs = []
-    for i, part in enumerate(parts):
-        if not part:
-            continue
-        if i % 2 == 1:  # 奇数段 = 公式（复用 formula 的三级分流，公式段里也可含中文）
-            mobs.append(formula(part, font_size=round(fs * 1.3), **kw))
-        else:           # 偶数段 = 中文文字
-            mobs.append(Text(part, font=CN_FONT, font_size=fs, **kw))
-    grp = VGroup(*mobs)
-    grp.arrange(RIGHT, buff=0.12)
-    # 防溢出：混排行整体超宽时等比缩小（画面安全宽度约 11.5 单位）。
-    # 不做这步，长句会静默超出画面 —— 又一个只有看视频才能发现的坑。
-    if grp.width > 11.5:
-        grp.scale_to_fit_width(11.5)
-    return grp
+# ---- 运行时 helper：安全求值、公式分流、防溢出、图例 ----
+{helper}
 
 
 class StoryboardScene(Scene):
@@ -115,22 +47,8 @@ class StoryboardScene(Scene):
 '''
 
 
-def render(storyboard: dict,
-           use_latex: bool = True,
-           cn_font: str = "STZhongsong") -> str:
-    """
-    把校验过的分镜 JSON 渲染成 Manim Python 源码。
-
-    Args:
-        storyboard: 已经过 schema.validate() 的分镜 dict
-        use_latex: 是否用 LaTeX 渲染公式（没装 LaTeX 时传 False）
-        cn_font: 中文字体（思源宋体 Source Han Serif CN / 楷体 KaiTi / 雅黑 Microsoft YaHei）
-
-    Returns:
-        Manim 场景源码字符串
-    """
-    # 自动探测 LaTeX：找不到就降级，绝不让渲染直接崩掉。
-    # MiKTeX 常常装了但不写 PATH，latex_env 会扫描常见路径并注入。
+def _prepare_env(use_latex: bool, fast: bool = False) -> dict:
+    """探测 LaTeX 并组装渲染环境。找不到就降级，绝不让渲染直接崩掉。"""
     if use_latex:
         info = latex_env.detect()
         if not info["available"]:
@@ -138,56 +56,132 @@ def render(storyboard: dict,
             use_latex = False
         elif info["injected"]:
             print(f"      [PATH+] 已注入 TeX 目录: {info['injected'][0]}")
+    return {"formula": "formula", "use_latex": use_latex, "fast": fast}
 
-    env = {"formula": "formula", "use_latex": use_latex}
+
+def _scene_code(sc, env):
+    """单个分镜 → (代码, 标签)。DSL 与旧模板两种写法都走这里。"""
+    if sc.get("mode") == "dsl":
+        code = dsl.build_scene(sc, env)
+        label = (f"scene {sc['id']} | dsl  "
+                 f"{len(sc['elements'])} 元素 / {len(sc['timeline'])} 动作")
+    else:
+        tpl_name = sc["template"]
+        code = templates.TEMPLATE_REGISTRY[tpl_name](sc["params"], env)
+        label = f"scene {sc['id']} | template: {tpl_name}"
+    return code, label
+
+
+# 分镜边界的统一清屏片段。
+#
+# 为什么放在这里而不是让每个模板自己清：
+#   清屏是"分镜之间"的规则，不是"某个模板"的规则。
+#   之前靠模板自觉（末尾 FadeOut），但 step_card 的累积板书
+#   需要保留到本分镜结束，于是下一个分镜就直接叠了上去 ——
+#   画面能渲染、代码不报错，内容却是错的（静默失败）。
+_CLEAR = (
+    "        # ---- 清屏：移除上一个分镜的残留 ----\n"
+    "        if self.mobjects:\n"
+    "            self.play(FadeOut(Group(*self.mobjects)), run_time=0.35)\n"
+    "            self.clear()\n"
+)
+
+
+def render(storyboard: dict,
+           use_latex: bool = True,
+           cn_font: str = "STZhongsong",
+           fast: bool = False) -> str:
+    """
+    把校验过的分镜 JSON 渲染成 Manim Python 源码（所有分镜拼成一个 Scene）。
+
+    Args:
+        storyboard: 已经过 schema.validate() 的分镜 dict
+        use_latex: 是否用 LaTeX 渲染公式（没装 LaTeX 时传 False）
+        cn_font: 中文字体
+
+    Returns:
+        Manim 场景源码字符串
+    """
+    env = _prepare_env(use_latex, fast)
 
     blocks = []
     for idx, sc in enumerate(storyboard["scenes"]):
-        tpl_name = sc["template"]
-        fn = templates.TEMPLATE_REGISTRY[tpl_name]
-        code = fn(sc["params"], env)
-
-        # ---- 分镜边界：统一清屏 ----
-        #
-        # 为什么放在这里而不是让每个模板自己清：
-        #   清屏是"分镜之间"的规则，不是"某个模板"的规则。
-        #   之前靠模板自觉（末尾 FadeOut），但 step_card 的累积板书
-        #   需要保留到本分镜结束，于是下一个分镜就直接叠了上去 ——
-        #   画面能渲染、代码不报错，内容却是错的（静默失败）。
-        #   放在渲染层统一处理，任何模板（包括以后新加的）都不可能漏掉。
-        if idx == 0:
-            head = ""
-        else:
-            head = (
-                "        # ---- 清屏：移除上一个分镜的残留 ----\n"
-                "        if self.mobjects:\n"
-                "            self.play(FadeOut(Group(*self.mobjects)), run_time=0.35)\n"
-                "            self.clear()\n"
-            )
-
-        blocks.append(
-            head
-            + f"        # ---- scene {sc['id']} | template: {tpl_name} ----\n"
-            + code
-            + "\n"
-        )
-
-    body = "\n".join(blocks)
+        code, label = _scene_code(sc, env)
+        head = "" if idx == 0 else _CLEAR
+        blocks.append(head + f"        # ---- {label} ----\n" + code + "\n")
 
     src = HEADER.format(
         title=storyboard.get("title", "untitled"),
-        use_latex=use_latex,
+        use_latex=env["use_latex"],
         cn_font=cn_font,
-        template_helper=templates.SAFE_EXPR_HELPER,
-        body=body,
+        helper=dsl.RUNTIME_HELPER,
+        body="\n".join(blocks),
     )
+
+    _check_syntax(src)
     return src
 
 
+def _check_syntax(src: str) -> None:
+    """
+    闸 4：生成结果必须先过一遍 Python 编译。
+
+    模板是确定性代码，理论上不会出语法错误；但 DSL 路径是"自由组合"出来的，
+    任何一条 f-string 拼接都可能拼出坏字符。与其让 manim 报一堆看不懂的错，
+    不如在这里用一行 compile() 把"语法错误为 0"变成硬保证。
+    """
+    try:
+        compile(src, "<storyboard_generated>", "exec")
+    except SyntaxError as e:
+        raise SyntaxError(
+            f"生成的 Manim 代码有语法错误（这是渲染器的 bug，不是分镜的问题）：\n"
+            f"  行 {e.lineno}: {e.msg}\n  {e.text}"
+        ) from e
+
+
+def render_split(storyboard: dict,
+                 use_latex: bool = True,
+                 cn_font: str = "STZhongsong",
+                 fast: bool = False) -> list:
+    """
+    每个分镜生成一份**独立可渲染**的源码 —— 并行渲染用。
+
+    为什么值得做：实测串行渲染 4 个分镜 48.1s，4 进程并行只要 11.4s（20 核）。
+    本机瓶颈是 Python 侧的 mobject 计算而不是光栅化（像素量涨 4.3 倍只慢 12%），
+    所以多核并行才是真正有效的加速手段，换 GPU 最多省 12%。
+
+    附带好处：某个分镜失败时只重跑那一个，正合 PROJECT_KNOWLEDGE 决策 3
+    「每个分镜可独立重试」。
+
+    Returns:
+        [(scene_id, src), ...]，顺序与输入分镜一致
+    """
+    env = _prepare_env(use_latex, fast)
+    out = []
+    for idx, sc in enumerate(storyboard["scenes"]):
+        code, label = _scene_code(sc, env)
+        # 拆分渲染后靠 ffmpeg 拼接，每个分镜末尾必须淡出，
+        # 否则片段之间会硬切（单场景模式下这一步由下一个分镜的 _CLEAR 完成）
+        code += (
+            "\n        if self.mobjects:\n"
+            "            self.play(FadeOut(Group(*self.mobjects)), run_time=0.35)\n"
+        )
+        src = HEADER.format(
+            title=storyboard.get("title", "untitled"),
+            use_latex=env["use_latex"],
+            cn_font=cn_font,
+            helper=dsl.RUNTIME_HELPER,
+            body=f"        # ---- {label} ----\n" + code,
+        )
+        _check_syntax(src)
+        out.append((sc.get("id", idx + 1), src))
+    return out
+
+
 def render_to_file(storyboard: dict, out_path: str, use_latex: bool = True,
-                   cn_font: str = "STZhongsong") -> str:
+                   cn_font: str = "STZhongsong", fast: bool = False) -> str:
     """渲染并写入 .py 文件，返回文件路径。"""
-    src = render(storyboard, use_latex=use_latex, cn_font=cn_font)
+    src = render(storyboard, use_latex=use_latex, cn_font=cn_font, fast=fast)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(src)

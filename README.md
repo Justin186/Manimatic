@@ -3,7 +3,17 @@
 把「分镜 JSON」确定性地渲染成数学讲解动画的 demo。
 
 **核心思想**：不让大模型直接写 Manim 代码，而是让它输出受约束的分镜 JSON，
-由固定模板翻译成代码。这样语法错误为 0、API 版本冲突为 0、布局不会越界。
+由确定性渲染器翻译成代码。这样语法错误为 0、API 版本冲突为 0。
+
+分镜有**两种写法**：
+
+| 写法 | 大模型要做什么 | 组合空间 | 适用 |
+|---|---|---|---|
+| **DSL 式（推荐）** | 自由取元素 + 自由排时间线 | 20 种元素 × 26 种动作 × 任意数量，无上限 | 所有题，画面不重样 |
+| **模板式（兼容旧分镜）** | 从 9 个模板里选一个填参数 | 9 个模板 × 各自几个参数 | 老 examples，不再新增 |
+
+> 模板式的问题是画面千篇一律：想做「曲线上有个动点滑动，切线跟着转，右上角实时显示斜率」
+> 这种联动，5 个老模板里没有一个能做。DSL 式就是为解掉这个枷锁来的。
 
 > **项目知识库**（决策依据、踩坑清单、给后续 AI 的提示词模板）：见 `PROJECT_KNOWLEDGE.md`，**接手这个项目先读这一份**。
 
@@ -86,6 +96,46 @@ python generate.py examples/_bad_case_demo.json
 
 输出视频在 `output/` 目录。
 
+### 渲染速度与画质选择（2026-09-10 实测，本机 20 核）
+
+**先说结论：帧率比分辨率更花钱，分辨率几乎免费。**
+
+| 配置 | 耗时 | 说明 |
+|---|---|---|
+| 480p15 | 18.0 s | 基线 |
+| **720p15** | **18.3 s** | 分辨率翻倍，几乎不花钱 |
+| 720p24 | 21.8 s | 推荐：画质明显好，只多 3.8 s |
+| 720p30 | 23.7 s | 帧率翻倍才真正变慢 |
+
+```bash
+# 推荐：720p24，兼顾画质与速度
+python generate.py examples/free_derivative.json --resolution 1280,720 --fps 24
+
+# 还想更快：首次渲染加 --fast（60s → 39s）
+python generate.py examples/free_derivative.json --fast --resolution 1280,720 --fps 24
+
+# 反复调同一份分镜：--parallel 带增量缓存，重跑只要 0.2 s
+python generate.py examples/free_derivative.json --parallel
+```
+
+**`--fast` 为什么有效**：首次渲染的 57% 花在 LaTeX 编译上（一次约 1.4 秒）。
+`--fast` 把坐标轴刻度数字改用 `Text` 渲染（刻度只是 0/1/2，根本不需要 LaTeX 排版），
+24 次编译降到 16 次。**出片时去掉 `--fast`，刻度会恢复成数学字体。**
+
+### 关于 GPU：这条路走不通，别再试了
+
+已实测三条路，全部无效（数据说话）：
+
+| 尝试 | 结果 |
+|---|---|
+| `--renderer=opengl` | 拿到的是 **Intel 核显**（不是 RTX）。耗时 18.3s vs Cairo 17.1s —— **更慢** |
+| 强制用 N 卡 | `glcontext` 只打包了 Windows WGL 后端，没有 egl/osmesa 可选，程序层面无法指定 GPU |
+| NVENC 硬件编码 | 可用，但 0.38s vs CPU 0.30s —— 更慢，文件还大 5.5 倍；编码只占总耗时 0.7% |
+
+**根本原因**：把像素量提高 4.3 倍（480p15→720p30），耗时只涨 12%。
+说明光栅化只占总耗时约 12% —— 这就是 GPU 加速的理论上限，而实际用核显还会倒亏。
+真正的开销在 **LaTeX 编译（57%）** 和 **Python 侧的 mobject 计算**，两者都是纯 CPU。
+
 ---
 
 ## 三、项目结构
@@ -94,13 +144,14 @@ python generate.py examples/_bad_case_demo.json
 MathStoryboard/
 ├── PROJECT_KNOWLEDGE.md   ⭐ 项目知识库（团队交付必带，含 5 节踩坑清单、决策依据）
 ├── storyboard/
-│   ├── templates.py     # 5 个 Manim 代码模板（确定性代码，大模型碰不到）
-│   ├── schema.py        # 分镜 JSON 校验（拦截越界/非法值/危险表达式/含中文 label）
-│   ├── renderer.py      # JSON → Manim 源码（含 LaTeX/CJK 自动分流）
+│   ├── dsl.py           # ⭐ 元素库 + 动作库 + 代码构建器（DSL 写法的核心）
+│   ├── templates.py     # 9 个旧模板（确定性代码，兼容旧分镜，不再新增）
+│   ├── schema.py        # 分镜 JSON 校验，自动识别 DSL / 模板两种写法
+│   ├── renderer.py      # JSON → Manim 源码（含 LaTeX/CJK 分流、生成后 compile 自检）
 │   └── latex_env.py     # MiKTeX/TeX Live 自动探测 + PATH 注入
-├── examples/            # 分镜 JSON 样例
+├── examples/            # 分镜 JSON 样例（free_*.json 是 DSL 写法）
 ├── output/              # 生成的 .py 和 mp4
-├── generate.py          # 主入口
+├── generate.py          # 主入口（--spec 可打印给大模型看的 DSL 规格）
 ├── check_env.py         # 环境自检 + MathTex 实测渲染
 └── requirements.txt
 ```
@@ -128,13 +179,57 @@ MathStoryboard/
 
 ---
 
-## 五、当前只实现了 5 个模板
+## 五、DSL 写法：元素 + 时间线
 
-`title_card` / `axes_plot` / `function_transform` / `summary_card` / `step_card`
+一个分镜 = **elements（画面上有什么）+ timeline（按什么顺序动）**。
 
-按方案建议，起始 5 个模板应为：函数变换、几何证明、数列求和、导数几何意义、向量变换。
-**下一步是补齐几何证明和向量变换两个模板**——照着 `templates.py` 里现有模板的写法加即可，
-每个模板约 20 行。
+```json
+{
+  "id": 2,
+  "elements": [
+    { "id": "ax", "kind": "axes", "x_range": [-1.5, 3.5, 1], "y_range": [-1, 8, 1] },
+    { "id": "t",  "kind": "tracker", "value": -1.0 },
+    { "id": "g",  "kind": "plot", "axes": "ax", "expr": "x**2", "color": "PRIMARY" },
+    { "id": "p",  "kind": "dot", "at": { "ref": "ax", "x": "$t", "y": "t**2" } },
+    { "id": "tan","kind": "line",
+      "start": { "ref": "ax", "x": "$t - 1.1", "y": "t**2 - 2*t*1.1" },
+      "end":   { "ref": "ax", "x": "$t + 1.1", "y": "t**2 + 2*t*1.1" }, "color": "RED" }
+  ],
+  "timeline": [
+    { "do": "create", "target": "ax" },
+    { "do": "create", "target": "g", "run_time": 1.6 },
+    { "do": "show", "target": ["p", "tan"] },
+    { "do": "tracker_to", "target": "t", "to": 3.0, "run_time": 7.5, "rate_func": "smooth" }
+  ]
+}
+```
+
+一个 tracker 同时驱动动点、切线和斜率数字 —— 这是旧模板做不到的联动。
+
+**元素库 20 种**：`text` `formula` `axes` `number_plane` `plot` `parametric` `area`
+`riemann` `dot` `line` `arrow` `circle` `ellipse` `rect` `polygon` `angle` `brace`
+`table` `legend` `highlight` `number` `tracker` `group`
+
+**动作库 26 种**：`create` `write` `fade_in` `grow` `draw_border` `show` `transform`
+`replace` `indicate` `circumscribe` `flash` `wiggle` `focus` `fade_out` `remove`
+`shift` `move_to` `scale` `rotate` `set_color` `set_opacity` `set_stroke` `stretch`
+`move_along` `trace` `tracker_to` `wait`
+
+完整规格不用手写 —— `storyboard/dsl.py` 里 `ELEMENT_SPEC` / `ACTION_SPEC` 一份定义，
+校验和文档都从它生成：
+
+```bash
+python generate.py --spec          # 打印给大模型看的 DSL 规格，直接塞进 prompt
+```
+
+### 跑两个新示例
+
+```bash
+python generate.py examples/free_derivative.json     # 导数几何意义（动点 + 切线 + 实时斜率）
+python generate.py examples/free_pythagorean.json    # 勾股定理（多边形 + 直角标记 + 填充）
+```
+
+`free_pythagorean.json` 这类几何题，是 5 个老模板**完全覆盖不到**的题型。
 
 ---
 

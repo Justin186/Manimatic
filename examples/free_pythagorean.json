@@ -1,0 +1,235 @@
+{
+  "title": "勾股定理：面积证法",
+  "problem_type": "geometry",
+
+  "_note": "几何证明是旧模板完全覆盖不到的题型 —— 5 个老模板里没有一个能画多边形、直角标记和填充。DSL 只是把 polygon / angle 这类元素加进库，写法和其它题完全一样。",
+
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 4.5,
+      "elements": [
+        {
+          "id": "h",
+          "kind": "text",
+          "content": "为什么 $a^2 + b^2 = c^2$？",
+          "font_size": 42,
+          "color": "PRIMARY",
+          "place": [{ "edge": "up", "buff": 1.6 }]
+        },
+        {
+          "id": "sub",
+          "kind": "text",
+          "content": "把三边各自向外做一个正方形，比面积",
+          "font_size": 25,
+          "color": "SECONDARY",
+          "place": [{ "next_to": { "of": "h", "direction": "down", "buff": 0.5 } }]
+        }
+      ],
+      "timeline": [
+        { "do": "write", "target": "h", "run_time": 1.4 },
+        { "do": "fade_in", "target": "sub", "run_time": 0.8 },
+        { "do": "wait", "time": 1.2 }
+      ]
+    },
+
+    {
+      "id": 2,
+      "duration": 9.0,
+      "_note": "三角形 + 直角标记 + 顶点标签",
+      "elements": [
+        {
+          "id": "tri",
+          "kind": "polygon",
+          "points": [[-3.4, -1.6], [-1.6, -1.6], [-3.4, 0.8]],
+          "color": "PRIMARY",
+          "stroke_width": 4,
+          "fill_opacity": 0.18
+        },
+        {
+          "id": "rt",
+          "kind": "angle",
+          "vertex": [-3.4, -1.6],
+          "a": [-1.6, -1.6],
+          "c": [-3.4, 0.8],
+          "radius": 0.42,
+          "color": "WHITE",
+          "right": true
+        },
+        {
+          "id": "la",
+          "kind": "text",
+          "content": "A",
+          "font_size": 30,
+          "color": "WHITE",
+          "place": [{ "at_point": [-3.75, -1.95] }]
+        },
+        {
+          "id": "lb",
+          "kind": "text",
+          "content": "B",
+          "font_size": 30,
+          "color": "WHITE",
+          "place": [{ "at_point": [-1.25, -1.95] }]
+        },
+        {
+          "id": "lc",
+          "kind": "text",
+          "content": "C",
+          "font_size": 30,
+          "color": "WHITE",
+          "place": [{ "at_point": [-3.75, 1.1] }]
+        },
+        {
+          "id": "cap",
+          "kind": "text",
+          "content": "取一个 $3$-$4$-$5$ 的直角三角形",
+          "font_size": 26,
+          "color": "WHITE",
+          "place": [{ "edge": "up", "buff": 0.5 }]
+        }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "create", "target": "tri", "run_time": 1.4 },
+        { "do": "create", "target": "rt", "run_time": 0.7 },
+        { "do": "fade_in", "target": ["la", "lb", "lc"], "run_time": 0.6 },
+        { "do": "wait", "time": 1.6 }
+      ]
+    },
+
+    {
+      "id": 3,
+      "duration": 13.0,
+      "_note": "三边各向外做正方形，并标出各自的面积 —— 结论自己就浮现了",
+      "elements": [
+        {
+          "id": "tri",
+          "kind": "polygon",
+          "points": [[-3.4, -1.6], [-1.6, -1.6], [-3.4, 0.8]],
+          "color": "PRIMARY",
+          "stroke_width": 4,
+          "fill_opacity": 0.18
+        },
+        {
+          "id": "sq_a",
+          "kind": "polygon",
+          "points": [[-3.4, -1.6], [-1.6, -1.6], [-1.6, -3.4], [-3.4, -3.4]],
+          "color": "GREEN",
+          "stroke_width": 3,
+          "fill_opacity": 0.28
+        },
+        {
+          "id": "sq_b",
+          "kind": "polygon",
+          "points": [[-3.4, -1.6], [-3.4, 0.8], [-5.8, 0.8], [-5.8, -1.6]],
+          "color": "TEAL",
+          "stroke_width": 3,
+          "fill_opacity": 0.28
+        },
+        {
+          "id": "sq_c",
+          "kind": "polygon",
+          "points": [[-1.6, -1.6], [-3.4, 0.8], [-1.0, 2.6], [0.8, 0.2]],
+          "color": "GOLD",
+          "stroke_width": 3,
+          "fill_opacity": 0.28
+        },
+        {
+          "id": "n_a",
+          "kind": "text",
+          "content": "$9$",
+          "font_size": 34,
+          "color": "GREEN",
+          "place": [{ "at_point": [-2.5, -2.5] }]
+        },
+        {
+          "id": "n_b",
+          "kind": "text",
+          "content": "$16$",
+          "font_size": 34,
+          "color": "TEAL",
+          "place": [{ "at_point": [-4.6, -0.4] }]
+        },
+        {
+          "id": "n_c",
+          "kind": "text",
+          "content": "$25$",
+          "font_size": 34,
+          "color": "GOLD",
+          "place": [{ "at_point": [-1.3, 0.5] }]
+        },
+        {
+          "id": "eq",
+          "kind": "formula",
+          "content": "9 + 16 = 25",
+          "font_size": 40,
+          "color": "ACCENT",
+          "place": [{ "corner": "ur", "buff": 0.9 }]
+        },
+        {
+          "id": "lg",
+          "kind": "legend",
+          "items": [["GREEN", "$a^2$"], ["TEAL", "$b^2$"], ["GOLD", "$c^2$"]],
+          "font_size": 20,
+          "place": [{ "next_to": { "of": "eq", "direction": "down", "buff": 0.35, "aligned": "right" } }]
+        },
+        {
+          "id": "cap",
+          "kind": "text",
+          "content": "两个小正方形的面积之和，正好等于大正方形",
+          "font_size": 25,
+          "color": "WHITE",
+          "place": [{ "edge": "down", "buff": 0.4 }]
+        }
+      ],
+      "timeline": [
+        { "do": "create", "target": "tri", "run_time": 0.8 },
+        { "do": "draw_border", "target": "sq_a", "run_time": 1.3 },
+        { "do": "write", "target": "n_a", "run_time": 0.7 },
+        { "do": "draw_border", "target": "sq_b", "run_time": 1.3 },
+        { "do": "write", "target": "n_b", "run_time": 0.7 },
+        { "do": "draw_border", "target": "sq_c", "run_time": 1.5 },
+        { "do": "write", "target": "n_c", "run_time": 0.7 },
+        { "do": "fade_in", "target": "lg", "run_time": 0.6 },
+        { "do": "write", "target": "eq", "run_time": 1.2 },
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "indicate", "target": "eq", "run_time": 1.1 },
+        { "do": "wait", "time": 1.2 }
+      ]
+    },
+
+    {
+      "id": 4,
+      "duration": 6.0,
+      "elements": [
+        {
+          "id": "th",
+          "kind": "text",
+          "content": "结论",
+          "font_size": 38,
+          "color": "PRIMARY",
+          "place": [{ "edge": "up", "buff": 1.4 }]
+        },
+        { "id": "s1", "kind": "text", "content": "直角三角形两直角边的平方和等于斜边的平方", "font_size": 28 },
+        { "id": "s2", "kind": "text", "content": "$a^2 + b^2 = c^2$，与三角形的大小无关", "font_size": 28, "color": "SECONDARY" },
+        {
+          "id": "grp",
+          "kind": "group",
+          "items": ["s1", "s2"],
+          "direction": "down",
+          "buff": 0.6,
+          "aligned": "left",
+          "place": [{ "next_to": { "of": "th", "direction": "down", "buff": 0.9 } }]
+        },
+        { "id": "box", "kind": "highlight", "of": "grp", "color": "ACCENT", "buff": 0.3 }
+      ],
+      "timeline": [
+        { "do": "write", "target": "th", "run_time": 1.0 },
+        { "do": "write", "target": "grp", "run_time": 2.2, "lag_ratio": 0.6 },
+        { "do": "create", "target": "box", "run_time": 0.7 },
+        { "do": "wait", "time": 1.4 }
+      ]
+    }
+  ]
+}

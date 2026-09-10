@@ -45,6 +45,60 @@
 | LLM 数学计算会错，要 SymPy 兜底 | AIME 2026 前沿模型 95–100% | 撤回。SymPy 降级为最终答案抽查 |
 | 现场实时生成太慢，必须预生成 | 实测 1.8–3.2s/分镜 | 改成"实时为主，预生成为辅" |
 | 船闸调度公开资料极少 | 桂交规〔2026〕2 号 + 平陆运河条例全文公开 | 调研推翻，跳船闸选题 |
+| 「只做 5 个模板」能保证可控 | 能保证不崩，但画面千篇一律，且联动效果做不出来 | 见决策 5：改成元素库 + 时间线 |
+
+### 决策 5：模板枚举 → 元素库 + 时间线 DSL（2026-09-10）
+
+**背景**：决策 1（LLM 不写代码）依然成立，但我把"受约束"实现成了「从 9 个模板里选一个」，
+等于把组合空间锁死在 9 × 几个参数。实测后果有两个：
+1. 画面千篇一律 —— 同一题型换道题，出来的几乎一模一样；
+2. 稍复杂的联动（曲线上动点滑动 + 切线跟着转 + 右上角实时显示斜率）**没有一个模板能做**。
+
+**结论**：把"模板"降级为"元素库 + 动作库"。LLM 输出 `elements` + `timeline`，
+元素类型和动作仍从白名单取（该约束不变），但**组合方式和数量不受限**。
+
+**为什么这不违背决策 1**：变的是"大模型能表达多少种组合"，不是"大模型能不能写代码"。
+代码依然 100% 由 Python 生成，`renderer.render()` 末尾还加了一道 `compile()` 硬校验。
+
+**自由度上去后，可运行性靠五道闸**（详见 `storyboard/dsl.py` 顶部注释）：
+1. 元素由确定性构建器生成，LLM 一个字符代码都不写
+2. 表达式走 **AST 白名单** + 受限命名空间 eval；NaN / Inf / 异常一律兜底成 0，绝不崩
+3. 类型 / 范围 / **引用完整性**在渲染前校验（引用不存在的元素是新的静默失败大户）
+4. 生成后强制 `compile()` ——「语法错误为 0」从"理论上"变成硬保证
+5. 文本元素自动 `_fit()` 防溢出
+
+**实测**（2026-09-10，本机 480p15）：
+- 12 类非法分镜（代码注入 / 未知元素 / 拼错变量名 / id 重复 / 缺必填 / 越界…）
+  **全部在渲染前拦下，漏检 0**
+- `free_derivative.json`（4 分镜，含 7.5s tracker 联动）渲染 43.0s，平均 10.7s/分镜
+- `free_pythagorean.json`（4 分镜，几何）渲染 21.8s，平均 5.5s/分镜
+- 20 个旧模板分镜全部回归通过（`_bad_case_demo.json` 按预期报错）
+
+### 决策 6：渲染加速走「减 LaTeX + 多核」，不走 GPU（2026-09-10）
+
+**被问到"能不能上 GPU"，实测三条路全部走不通**（RTX 5070 Ti + Intel 核显双显卡）：
+
+| 尝试 | 实测结果 |
+|---|---|
+| `--renderer=opengl` | 渲染成功但拿到的是 **Intel 核显**；18.3s vs Cairo 17.1s，**更慢** |
+| 强制指定 N 卡 | `glcontext` 只打包了 Windows WGL 后端（`egl`/`osmesa` 均不可用），GPU 由驱动决定，程序层面无法指定；NV 扩展数为 0 |
+| NVENC 硬件编码 | `h264_nvenc` 可用，但 0.38s vs CPU 0.30s 更慢，文件大 5.5 倍；编码仅占总耗时 0.7% |
+
+**判据**：像素量提高 4.3 倍（480p15 → 720p30），耗时只涨 12%。
+→ 光栅化只占约 12%，这是 GPU 加速的理论天花板，用核显还会倒亏。
+
+**真正的开销分布**（首次渲染 60s 的 free_derivative）：
+- LaTeX 编译 24 次 ≈ 34s（**57%**）
+- Python 侧 mobject 计算 + 帧生成 ≈ 23s
+- 光栅化 ≈ 3s（12%）
+
+**所以对症的优化是**：
+1. `--fast`：坐标轴刻度改用 Text 渲染 → LaTeX 编译 24→16 次，**60s → 39s**
+2. 降帧率：帧率比分辨率更花钱（720p15 与 480p15 几乎一样快，720p30 才明显变慢）
+3. `--parallel` 增量渲染：重跑同一份分镜 **0.2s**（首次反而更慢，因为每进程要重复付启动+LaTeX 开销）
+
+**720p 的结论（给担心画质的人）**：720p 几乎免费 —— 480p15 是 18.0s，720p15 是 18.3s。
+推荐 `--resolution 1280,720 --fps 24`（21.8s），画质提升明显、只多 3.8s。
 
 ---
 
@@ -58,7 +112,8 @@ D:\MathStoryboard\
 ├── requirements.txt
 ├── storyboard/
 │   ├── __init__.py
-│   ├── templates.py        5 个模板（确定性代码，不经 LLM）
+│   ├── dsl.py              ⭐ 元素库+动作库+构建器（DSL 写法核心，接手先读它的顶部注释）
+│   ├── templates.py        9 个旧模板（确定性代码，仅兼容旧分镜，不再新增）
 │   ├── schema.py           分镜 JSON 校验（拦截静默失败）
 │   ├── renderer.py         JSON → Manim 源码（含 LaTeX 自动分流）
 │   └── latex_env.py        MiKTeX/TeX Live 自动探测与 PATH 注入
@@ -221,10 +276,11 @@ D:/Miniconda/envs/manim/python.exe generate.py examples/quadratic_transform.json
 你在接手一个 Manim 讲解视频生成项目（MathStoryboard）。
 
 **核心架构（不许改）**：
-- 大模型只输出受 Schema 约束的分镜 JSON
-- 确定性 Python 模板翻译成 Manim 代码
-- 模板在 storyboard/templates.py，禁止 LLM 写 Manim 代码
-- 校验在 storyboard/schema.py，专门拦截静默失败
+- 大模型只输出受 Schema 约束的分镜 JSON，绝不写 Manim 代码
+- 分镜有两种写法：**DSL 式（推荐，元素+时间线）** / 模板式（兼容旧分镜）
+- 元素库与动作库在 storyboard/dsl.py，规格用 `python generate.py --spec` 打印
+- 旧模板在 storyboard/templates.py，只做兼容，不要新增模板
+- 校验在 storyboard/schema.py + dsl.py，专门拦截静默失败
 
 **环境**：
 - Python 3.12.14, D:\Miniconda\envs\manim\python.exe
@@ -233,15 +289,17 @@ D:/Miniconda/envs/manim/python.exe generate.py examples/quadratic_transform.json
 
 **先看这些文档**（顺序很重要）：
 1. D:\MathStoryboard\PROJECT_KNOWLEDGE.md（本文件）
-2. D:\MathStoryboard\README.md
-3. C:\Users\Justin\WorkBuddy\2026-09-08-11-01-38\赛道三-方案澄清-产品形态与链路决策.md
-4. C:\Users\Justin\WorkBuddy\2026-09-08-11-01-38\赛道三-讲解视频动画方案评估.md
-5. D:\MathStoryboard\examples\quadratic_transform.json （看实际分镜格式）
+2. D:\MathStoryboard\storyboard\dsl.py（顶部注释讲清了为什么改、五道闸是什么）
+3. D:\MathStoryboard\README.md
+4. D:\MathStoryboard\examples\free_derivative.json （DSL 写法的实际分镜）
+5. D:\MathStoryboard\examples\free_pythagorean.json（几何题，老模板做不到）
 
 **红线**：
-- 禁止让 LLM 写 Manim 代码（架构原则）
-- 禁止 label/formula_latex 字段含中文（schema 校验会拦，但别绕过）
-- 改模板必须用 Manim CE API（Create/Transform，不是 GL 的 ShowCreation）
+- 禁止让 LLM 写 Manim 代码（架构原则，决策 1）
+- 新增元素/动作要在 dsl.py 的 ELEMENT_SPEC / ACTION_SPEC 里登记，
+  并且**必须同时写对应的 _mk_xxx / _anim 实现**，否则校验放行、构建时崩
+- 只允许 Manim CE API（Create/Transform，不是 GL 的 ShowCreation）
+- 校验层不能"为了跑通"而放宽 —— 拦下来的错误就是原本会变成静默失败的错误
 - 单分镜出片超过 60 秒 = 性能回归，要查不要忍
 ```
 

@@ -3,8 +3,16 @@
 
 这一层是「把不确定性从代码层上移到数据层」的具体落地：
 大模型输出的是受约束的数据，不是自由生成的代码。
-校验通过后才交给模板渲染器，越界/非法值在这一步就被拦截。
+校验通过后才交给渲染器，越界/非法值在这一步就被拦截。
+
+支持两种分镜写法：
+    v1 模板式  {"template": "axes_plot", "params": {...}}
+               —— 保留兼容，组合空间有限，画面容易千篇一律
+    v2 DSL 式  {"elements": [...], "timeline": [...]}
+               —— 推荐。元素自由组合 + 动作自由编排，详见 dsl.py
 """
+
+from . import dsl
 
 # 允许的颜色（防止大模型写出不存在的颜色常量）
 ALLOWED_COLORS = {
@@ -116,6 +124,17 @@ def validate(storyboard: dict, registry: dict) -> dict:
             raise SchemaError(f"scene {sid}: id 重复")
         seen_ids.add(sid)
 
+        # ---- v2：元素 + 时间线（DSL 式，推荐）----
+        # 判定条件很宽松：只要出现 elements 或 timeline 之一就走 DSL 分支，
+        # 剩下的交给 dsl.validate_scene 报出精确错误（比如"有 elements 却没 timeline"）。
+        if "elements" in sc or "timeline" in sc:
+            dsl_scene = dsl.validate_scene(sc, sid)
+            dsl_scene["id"] = sid
+            dsl_scene["mode"] = "dsl"
+            out["scenes"].append(dsl_scene)
+            continue
+
+        # ---- v1：模板 + 参数（兼容旧 examples）----
         tpl = sc.get("template")
         if tpl not in registry:
             raise SchemaError(
