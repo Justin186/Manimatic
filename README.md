@@ -118,9 +118,26 @@ python generate.py examples/free_derivative.json --fast --resolution 1280,720 --
 python generate.py examples/free_derivative.json --parallel
 ```
 
-**`--fast` 为什么有效**：首次渲染的 57% 花在 LaTeX 编译上（一次约 1.4 秒）。
-`--fast` 把坐标轴刻度数字改用 `Text` 渲染（刻度只是 0/1/2，根本不需要 LaTeX 排版），
-24 次编译降到 16 次。**出片时去掉 `--fast`，刻度会恢复成数学字体。**
+### 头条：LaTeX 批处理预热（默认开启）
+
+```
+清缓存后首次渲染：  60.0 s  →  12.9 s     快 4.7 倍
+```
+
+Manim 每个公式都单独跑一遍 `latex` + `dvisvgm`，而一次调用的约 400ms 几乎全是
+**固定初始化开销**（加载 TeX 引擎与宏包），跟公式复杂度无关。
+实测 28 个公式：逐个编译 **39 s**，塞进一个多页 tex 只编译一次 **1.4 s**。
+
+`storyboard/tex_batch.py` 在渲染前把所有公式（含坐标轴刻度数字）一次性编译掉，
+再按 Manim 自己的 hash 规则填进缓存，渲染时直接命中。
+
+```bash
+python generate.py examples/free_derivative.json --no-prewarm   # 关掉它做对比
+```
+
+**`--fast` 现在是可选的了**：它把刻度数字改用 `Text` 渲染（刻度只是 0/1/2，
+用不着 LaTeX 排版），能再省一点；但预热处理刻度之后两者差别已经不大。
+出片时去掉 `--fast`，刻度会恢复成数学字体。
 
 ### 关于 GPU：这条路走不通，别再试了
 
@@ -134,7 +151,8 @@ python generate.py examples/free_derivative.json --parallel
 
 **根本原因**：把像素量提高 4.3 倍（480p15→720p30），耗时只涨 12%。
 说明光栅化只占总耗时约 12% —— 这就是 GPU 加速的理论上限，而实际用核显还会倒亏。
-真正的开销在 **LaTeX 编译（57%）** 和 **Python 侧的 mobject 计算**，两者都是纯 CPU。
+真正的开销在 **LaTeX 编译** 和 **Python 侧的 mobject 计算**，两者都是纯 CPU。
+（LaTeX 那部分已经用批处理预热解决掉了，见上一节。）
 
 ---
 

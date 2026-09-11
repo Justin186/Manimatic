@@ -434,6 +434,28 @@ ELEMENT_SPEC = {
             "radius": (T_NUM, 0.12, "圆角"),
         },
     },
+    "tangent_line": {
+        "desc": "曲线在某点的切线（自动算斜率，x 可引用 tracker 实时跟踪）",
+        "params": {
+            "axes": (T_REF, None, "所属坐标系 id"),
+            "expr": (T_EXPR, "x", "曲线表达式 f(x)"),
+            "x": (T_COORD, 0.0, "切点的 x 坐标，可写 \"$t\""),
+            "length": (T_NUM, 2.5, "切线总长度"),
+            "color": (T_COLOR, "RED", "颜色"),
+            "stroke_width": (T_NUM, 3.0, "线宽"),
+        },
+    },
+    "normal_line": {
+        "desc": "曲线在某点的法线（垂直于切线，x 可引用 tracker）",
+        "params": {
+            "axes": (T_REF, None, "所属坐标系 id"),
+            "expr": (T_EXPR, "x", "曲线表达式 f(x)"),
+            "x": (T_COORD, 0.0, "法线足的 x 坐标，可写 \"$t\""),
+            "length": (T_NUM, 2.5, "法线总长度"),
+            "color": (T_COLOR, "TEAL", "颜色"),
+            "stroke_width": (T_NUM, 3.0, "线宽"),
+        },
+    },
     "number": {
         "desc": "动态数字标签（配合 tracker 实时显示斜率、面积等数值）",
         "params": {
@@ -487,6 +509,8 @@ ACTION_SPEC = {
     "trace": {"desc": "给动点加拖尾轨迹（TracedPath）", "target": True, "run_time": 0},
     "tracker_to": {"desc": "驱动追踪器变化（带它的元素会自动跟着动）", "target": True, "run_time": 3.0},
     "wait": {"desc": "停顿", "target": False, "run_time": 0.5},
+    "clear_all": {"desc": "FadeOut 并移除所有元素（一键清屏）", "target": False, "run_time": 0.5},
+    "parallel": {"desc": "并行执行多个子动作（每个可有独立 run_time）", "target": False, "run_time": None},
 }
 
 
@@ -655,6 +679,7 @@ REQUIRED = {
     "polygon": ["points"], "angle": ["a", "vertex", "c"],
     "brace": ["of"], "table": ["rows"], "legend": ["items"],
     "highlight": ["of"], "group": ["items"],
+    "tangent_line": ["axes", "expr"], "normal_line": ["axes", "expr"],
 }
 
 
@@ -1413,6 +1438,54 @@ class _Builder:
         return (f'SurroundingRectangle({_V}{el["of"]}, color={_color(el["color"])}, '
                 f'buff={_num(el["buff"])}, corner_radius={_num(el["radius"])})')
 
+    def _mk_tangent_line(self, el):
+        # 切线：过 (x0, f(x0))，斜率 f'(x0) 用中心差分求。
+        # 生成的代码始终在 always_redraw 内，支持 tracker 驱动。
+        dx = 1e-5
+        ax_v = f"{_V}{el['axes']}"
+        xcode = self._coord(el["x"])
+        names = sorted(set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", el["expr"])) & self.trackers)
+        extra = ", ".join(f"{n}={_V}{n}.get_value()" for n in names)
+        xp = f", {extra}" if extra else ""
+        e = _esc(el["expr"])
+        half = _num(el["length"])
+        # f(x0) 的求值表达式
+        fx0 = f'_safe_eval(r"""{e}""", {xcode}{xp})'
+        # 中心差分求 f'(x0)
+        slope = f'(_safe_eval(r"""{e}""", {xcode}+{dx}{xp}) - _safe_eval(r"""{e}""", {xcode}-{dx}{xp}))/(2*{dx})'
+        return (
+            f'Line('
+            f'{ax_v}.c2p({xcode} - {half}/2, {fx0} - ({slope}) * {half}/2), '
+            f'{ax_v}.c2p({xcode} + {half}/2, {fx0} + ({slope}) * {half}/2), '
+            f'color={_color(el["color"])}, stroke_width={_num(el["stroke_width"])})'
+        )
+
+    def _mk_normal_line(self, el):
+        # 法线：过 (x0, f(x0))，方向垂直于切线。
+        # 切线方向 (1, k) → 法线方向 (-k, 1)，归一化后取 half 长度。
+        # 用 np.hypot 避免 k≈0 时除零爆炸。
+        dx = 1e-5
+        ax_v = f"{_V}{el['axes']}"
+        xcode = self._coord(el["x"])
+        names = sorted(set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", el["expr"])) & self.trackers)
+        extra = ", ".join(f"{n}={_V}{n}.get_value()" for n in names)
+        xp = f", {extra}" if extra else ""
+        e = _esc(el["expr"])
+        half = _num(el["length"])
+        fx0 = f'_safe_eval(r"""{e}""", {xcode}{xp})'
+        slope = f'(_safe_eval(r"""{e}""", {xcode}+{dx}{xp}) - _safe_eval(r"""{e}""", {xcode}-{dx}{xp}))/(2*{dx})'
+        # 法线方向 = (-k, 1)，归一化后 * half/2
+        # x 方向分量 = -k / hypot(k, 1) * half/2
+        # y 方向分量 =  1 / hypot(k, 1) * half/2
+        return (
+            f'Line('
+            f'{ax_v}.c2p({xcode} - ({slope})/np.hypot({slope}, 1) * {half}/2, '
+            f'{fx0} + 1/np.hypot({slope}, 1) * {half}/2), '
+            f'{ax_v}.c2p({xcode} + ({slope})/np.hypot({slope}, 1) * {half}/2, '
+            f'{fx0} - 1/np.hypot({slope}, 1) * {half}/2), '
+            f'color={_color(el["color"])}, stroke_width={_num(el["stroke_width"])})'
+        )
+
     def _mk_number(self, el):
         unit = f', unit=r"""{_esc(el["unit"])}"""' if el.get("unit") else ""
         return (f'DecimalNumber({self._coord(el["value"])}, '
@@ -1435,6 +1508,19 @@ class _Builder:
         do = ac["do"]
         if do == "wait":
             self.lines.append(f"        self.wait({_num(ac['time'])})")
+            return
+        if do == "clear_all":
+            rt = ac.get("run_time", 0.5)
+            self.lines.append(
+                "        if self.mobjects:\n"
+                f"            self.play(FadeOut(Group(*self.mobjects)), run_time={_num(rt)})\n"
+                "            self.clear()"
+            )
+            return
+        if do == "parallel":
+            for sub in ac.get("actions", []):
+                self.lines.append(f"        # >> parallel > {sub.get('do', '?')}")
+                self.act(sub)
             return
 
         if "inline" in ac:
@@ -1578,8 +1664,18 @@ def build_scene(scene: dict, env: dict) -> str:
         for ac in scene["timeline"]:
             if ac["do"] == "wait":
                 est += ac["time"]
+            elif ac["do"] == "parallel":
+                # parallel 取所有子动作的 max（它们是并行播放的）
+                sub_max = 0.0
+                for sub in ac.get("actions", []):
+                    if sub["do"] == "wait":
+                        sub_max = max(sub_max, sub["time"])
+                    else:
+                        sub_max = max(sub_max, sub.get("run_time") or ACTION_SPEC[sub["do"]]["run_time"] or 0)
+                est += sub_max
             else:
-                est += ac.get("run_time") or ACTION_SPEC[ac["do"]]["run_time"]
+                rt = ac.get("run_time") or ACTION_SPEC[ac["do"]]["run_time"]
+                est += rt if rt is not None else 0
         pad = round(float(scene["duration"]) - est, 2)
         if pad > 0.1:
             b.lines.append(f"        self.wait({pad})")
@@ -1641,6 +1737,12 @@ def describe(include_place=True) -> str:
     out.append("")
     out.append("含 tracker 引用（或 live）的元素会被渲染成 always_redraw 对象：")
     out.append("**它们不会自动上屏，要用 `{\"do\":\"show\",\"target\":\"...\"}` 显式 add。**")
+    out.append("")
+    out.append("## 组合动画")
+    out.append("- **parallel**：并行执行多个子动作，每个可有独立 run_time。")
+    out.append('  ```{"do":"parallel","actions":[{"do":"create","target":"a","run_time":2},{"do":"write","target":"b","run_time":1}]}```')
+    out.append("- **clear_all**：一键 FadeOut + 清除所有元素，等价于旧模板的分镜间清屏。")
+    out.append("- **tangent_line / normal_line**：曲线在某点的切线/法线，x 可引用 tracker 实时跟踪。")
     out.append("")
     out.append("## 硬性规则")
     out.append("- formula/content 里的 LaTeX 用 `\\frac` 等命令；中文说明用 text 的 `$...$` 混排")

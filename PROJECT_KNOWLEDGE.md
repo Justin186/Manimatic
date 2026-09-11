@@ -92,8 +92,16 @@
 - Python 侧 mobject 计算 + 帧生成 ≈ 23s
 - 光栅化 ≈ 3s（12%）
 
-**所以对症的优化是**：
+**所以对症的优化是**（按收益排序）：
+0. **LaTeX 批处理预热**（默认开启，`storyboard/tex_batch.py`）：渲染前把所有公式
+   （含坐标轴刻度数字）塞进一个多页 tex 一次编译，再按 Manim 的 hash 填进缓存。
+   28 个公式：逐个编译 39s → 批处理 1.4s。
+   **清缓存首次渲染 60.0s → 12.9s（4.7 倍）**，收益最大的一项，且比"缓存全中"的
+   25.7s 还快一倍。用 `--no-prewarm` 关闭。
+   两个必知的坑：Manim 的 hash 是对**套了 `\special{dvisvgm:raw}` 标记之后**的内容
+   算的；dvisvgm 遇到 Windows 反斜杠路径会**返回 -4 且无报错**（见坑 8、坑 9）。
 1. `--fast`：坐标轴刻度改用 Text 渲染 → LaTeX 编译 24→16 次，**60s → 39s**
+   （有了预热之后这项变成可选）
 2. 降帧率：帧率比分辨率更花钱（720p15 与 480p15 几乎一样快，720p30 才明显变慢）
 3. `--parallel` 增量渲染：重跑同一份分镜 **0.2s**（首次反而更慢，因为每进程要重复付启动+LaTeX 开销）
 
@@ -178,6 +186,27 @@ D:/Miniconda/envs/manim/python.exe generate.py examples/quadratic_transform.json
 ### 坑 6：Manim 输出路径是分片目录
 **症状**：`find` 抓到了 `partial_movie_files/xxx.mp4`（未合并的中间产物）。
 **解决**：扫描时排除 `partial_movie_files` 目录。
+
+### 坑 8：dvisvgm 遇到 Windows 反斜杠路径会**静默失败**
+
+**症状**：`subprocess.run([dvisvgm, ..., f"--output={绝对路径}"])` 返回码 **-4**
+（4294967292），stdout/stderr **全空**，不产出任何文件。
+**原因**：dvisvgm 不认 Windows 的反斜杠路径，而它连错误消息都不打印。
+**解决**：改成 `cwd=工作目录` + 相对文件名（`--output=out-%p.svg`）。
+Manim 内部也是这么绕的（它用 `Path.as_posix()`）。
+**教训**：外部命令调用**不要吞 stderr**，否则这类"无声失败"极难定位。
+
+### 坑 9：Manim 的缓存 hash 是对「套了 \special 标记之后」的内容算的
+
+**症状**：自己照着 `tex_hash = sha256(tex内容)[:16]` 算出文件名、把 SVG 放进去，
+Manim 却完全不认，照样重新编译一遍。
+**原因**：Manim 给每个 tex_string 都套上
+`\special{dvisvgm:raw <g id='unique000'>} ... \special{dvisvgm:raw </g>}`
+（用于分部分上色），hash 是对**套好之后**的完整内容算的。直接拿原始公式算必然对不上。
+**解决**：拼 expression 时手动补上这对标记，并注意 MathTex 用 `align*` 环境、
+Tex 用 `None`。
+**验证方法**：预热后**再跑一次**，若 `cached == total` 就说明 hash 对上了
+（这是判断预热是否真的生效的唯一可靠信号）。
 
 ### 坑 7：沙箱里 which 找不到 latex
 **症状**（仅本会话）：在 AI 沙箱里 `which latex` 失败，但用户 cmd 里 `tex --version` 能用。
