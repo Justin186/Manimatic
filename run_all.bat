@@ -30,7 +30,7 @@ for %%f in (
   e3_quad_inequality
 ) do (
   echo ---------- %%f ----------
-  %PY% generate.py examples\%%f.json
+  %PY% generate.py examples\%%f.json --resolution 1280,720 --fps 24
   echo.
 )
 

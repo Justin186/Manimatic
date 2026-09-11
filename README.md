@@ -96,16 +96,54 @@ python generate.py examples/_bad_case_demo.json
 
 输出视频在 `output/` 目录。
 
+### 题目直接出片（LLM 接入）
+
+不想手写分镜 JSON：把题目丢给大模型，它只输出**受 Schema 约束的分镜 JSON**，
+过校验后由确定性渲染器翻译成 Manim —— 大模型一个字符的代码都不写（决策 1 没被破）。
+
+```bash
+# 1) 配一次密钥（三选一）
+set MSB_API_KEY=sk-xxx            # 环境变量
+# 或写 llm.local.json（已在 .gitignore）：{"provider":"deepseek","model":"deepseek-chat","api_key":"sk-xxx"}
+# 或每次带：--api-key sk-xxx
+
+# 2) 题目 → 视频
+python generate.py --problem "求 f(x)=x^3-3x 的极值" -q m
+python generate.py --problem-file 题目.txt --resolution 1280,720 --fps 24
+```
+
+厂商预设 `deepseek`（默认）/ `qwen` / `glm` / `moonshot` / `openai`；
+换厂商就是 `--provider qwen --model qwen-plus`，也可以 `--base-url` 接任意 OpenAI 兼容接口。
+
+**关键设计：校验失败会把错误回灌给模型重试。**
+"引用了没声明的 id"、"颜色拼错"、"duration 越界"这类错误，校验层能精确定位，
+于是把报错原样发回去让模型改 —— 重试不是碰运气，是**把校验层的确定性注入模型的下一轮**。
+`--attempts 4` 控制轮数上限，用尽则明确报错并保留每轮记录。
+
+生成的分镜落在 `output/<名字>_storyboard.json`：
+**想改画面就手改这份 JSON，再当普通分镜重跑** —— 这正是"分镜可编辑"的产品价值。
+
 ### 渲染速度与画质选择（2026-09-10 实测，本机 20 核）
 
 **先说结论：帧率比分辨率更花钱，分辨率几乎免费。**
 
 | 配置 | 耗时 | 说明 |
 |---|---|---|
-| 480p15 | 18.0 s | 基线 |
-| **720p15** | **18.3 s** | 分辨率翻倍，几乎不花钱 |
-| 720p24 | 21.8 s | 推荐：画质明显好，只多 3.8 s |
-| 720p30 | 23.7 s | 帧率翻倍才真正变慢 |
+| 720p30 | 23.1 s | 实机实测 |
+| **720p24** | **19.1 s** | 实机实测 —— **推荐**，帧数少 20%，耗时少 17% |
+| 720p15 | ≈ 13 s | 按下面的模型推算 |
+
+> 以上为 `free_product_rule.json`（8 分镜 / 71 秒成片）在**本机 VSCode 终端实机**测得。
+> ⚠️ 在 AI 沙箱 / 被代理的 shell 里测会虚高约 50%（固定开销被放大到淹没信号，
+> 表现为"改帧率几乎没差别"），**性能数据一律以实机为准**。
+
+由这两点可反推出成本模型：
+
+```
+每帧 ≈ 9.4 ms   固定开销 ≈ 3.1 s    帧渲染占总耗时 87%
+```
+
+所以降帧率是线性有效的（帧数减半，渲染时间近似减半），而降分辨率几乎白送。
 
 ```bash
 # 推荐：720p24，兼顾画质与速度
@@ -166,6 +204,7 @@ MathStoryboard/
 │   ├── templates.py     # 9 个旧模板（确定性代码，兼容旧分镜，不再新增）
 │   ├── schema.py        # 分镜 JSON 校验，自动识别 DSL / 模板两种写法
 │   ├── renderer.py      # JSON → Manim 源码（含 LaTeX/CJK 分流、生成后 compile 自检）
+│   ├── llm.py           # ⭐ LLM 接入：prompt + OpenAI 兼容调用 + 校验失败回灌重试
 │   └── latex_env.py     # MiKTeX/TeX Live 自动探测 + PATH 注入
 ├── examples/            # 分镜 JSON 样例（free_*.json 是 DSL 写法）
 ├── output/              # 生成的 .py 和 mp4
@@ -289,7 +328,6 @@ python generate.py examples/free_pythagorean.json    # 勾股定理（多边形 
 
 ## 七、还没做的部分
 
-- LLM 接入（目前分镜 JSON 是手写的）—— 接上后就是完整链路
 - Docker 沙箱（执行生成的代码必须隔离，方案评估文档里有配置要点）
 - 前端页面 / uni-app / 若依接入
 - 补 2 个新模板（几何证明、向量变换）

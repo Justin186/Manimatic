@@ -21,7 +21,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from storyboard import schema, renderer, templates, latex_env  # noqa: E402
-from storyboard import dsl, tex_batch  # noqa: E402
+from storyboard import dsl, tex_batch, llm  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTPUT = os.path.join(HERE, "output")
@@ -182,28 +182,108 @@ def main():
                          "720p15 与 480p15 几乎一样快，720p30 才明显变慢")
     ap.add_argument("--font", default="STZhongsong",
                     help="中文字体（STZhongsong=华文中宋 / KaiTi=楷体 / Microsoft YaHei=雅黑）")
+
+    # ---- LLM 接入：题目 → 分镜 JSON（不给就是原来的"手写 JSON"路径）----
+    ap.add_argument("--problem", default="",
+                    help="直接给题目文本，由大模型生成分镜（不用手写 JSON）")
+    ap.add_argument("--problem-file", default="", help="题目文本文件（UTF-8）")
+    ap.add_argument("--provider", default="",
+                    help=f"LLM 厂商预设: {sorted(llm.PROVIDERS)}")
+    ap.add_argument("--model", default="", help="模型名（不给则用厂商预设）")
+    ap.add_argument("--base-url", default="",
+                    help="自定义 OpenAI 兼容 base_url（必须带版本路径，如 https://xxx/v1）")
+    ap.add_argument("--api-key", default="",
+                    help="API 密钥（也可用环境变量 MSB_API_KEY 等，或 llm.local.json）")
+    ap.add_argument("--attempts", type=int, default=4,
+                    help="LLM 最多调用几轮（含校验失败后的带错重试），默认 4")
+    ap.add_argument("--temperature", type=float, default=None,
+                    help="采样温度，默认 0.2（分镜要稳，别太随机）")
+    ap.add_argument("--max-tokens", type=int, default=0,
+                    help="单次回复 token 上限，0 = 用默认 8192")
+    ap.add_argument("--no-json-mode", action="store_true",
+                    help="不要求接口强制 JSON 输出（部分厂商不支持 response_format）")
+    ap.add_argument("--rules", default="",
+                    help="追加给分镜师的额外要求，如「多用 tracker 做动态演示」")
+    ap.add_argument("--name", default="",
+                    help="输出文件名前缀（LLM 模式默认按时间戳命名）")
     args = ap.parse_args()
 
     if args.spec:
         print(dsl.describe())
         return 0
-    if not args.storyboard:
-        ap.error("需要提供分镜 JSON 路径（或用 --spec 查看 DSL 规格）")
 
-    # ---------- 1. 读取 ----------
-    path = args.storyboard
-    if not os.path.exists(path):
-        path = os.path.join(HERE, "examples", os.path.basename(args.storyboard))
-    if not os.path.exists(path):
-        print(f"[FAIL] 找不到分镜文件: {args.storyboard}")
-        return 1
+    # 题目来源：--problem / --problem-file。给了就走 LLM 生成分镜。
+    problem = args.problem
+    if args.problem_file:
+        if not os.path.exists(args.problem_file):
+            print(f"[FAIL] 找不到题目文件: {args.problem_file}")
+            return 1
+        with open(args.problem_file, "r", encoding="utf-8") as f:
+            problem = f.read()
+    problem = (problem or "").strip()
 
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
+    if not problem and not args.storyboard:
+        ap.error('需要提供分镜 JSON 路径，或用 --problem "题目" 让大模型生成'
+                 "（--spec 查看 DSL 规格）")
 
-    print(f"[1/4] 读取分镜: {os.path.basename(path)}")
+    # ---------- 1. 输入：题目 → LLM 生成 / 直接读手写分镜 ----------
+    name = ""
+    if problem:
+        # 1a. LLM 路径。生成 + 校验 + 失败带错重试全在 llm.py 里闭环，
+        #     这里拿到的已经是"过了校验"的分镜。
+        try:
+            cfg = llm.resolve_config(
+                provider=args.provider, model=args.model, base_url=args.base_url,
+                api_key=args.api_key, temperature=args.temperature,
+                max_tokens=args.max_tokens or None)
+        except llm.LLMError as e:
+            print(f"[FAIL] LLM 配置有误:\n{e}")
+            return 4
+
+        preview = problem[:60] + ("..." if len(problem) > 60 else "")
+        print(f"[1/4] 题目 → 分镜（{cfg['provider']} / {cfg['model']}）: {preview}")
+        t_llm = time.time()
+        try:
+            res = llm.generate_storyboard(
+                problem, cfg, templates.TEMPLATE_REGISTRY,
+                max_attempts=args.attempts, json_mode=not args.no_json_mode,
+                extra_rules=args.rules)
+        except llm.LLMError as e:
+            print(f"[FAIL] 分镜生成失败:\n{e}")
+            return 4
+
+        n_bad = sum(1 for h in res["history"] if not h["ok"])
+        print(f"      生成完成: {time.time() - t_llm:.1f}s，{res['attempts']} 轮调用"
+              + (f"（其中 {n_bad} 轮没通过校验、带错重试后修正）" if n_bad else ""))
+
+        # 把模型原始输出落盘 ——「分镜可编辑」是本项目的产品价值：
+        # 留一份人能看懂、能手改、能重跑的 JSON，改完当普通分镜跑即可。
+        name = args.name or time.strftime("llm_%m%d_%H%M%S")
+        os.makedirs(OUTPUT, exist_ok=True)
+        path = os.path.join(OUTPUT, f"{name}_storyboard.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(res["raw"], f, ensure_ascii=False, indent=2)
+        print(f"      分镜已保存: {path}")
+        print(f'      （要改画面就手改这份 JSON，再 python generate.py "{path}" 重跑）')
+        raw = res["raw"]
+    else:
+        # 1b. 手写 JSON 路径
+        path = args.storyboard
+        if not os.path.exists(path):
+            path = os.path.join(HERE, "examples", os.path.basename(args.storyboard))
+        if not os.path.exists(path):
+            print(f"[FAIL] 找不到分镜文件: {args.storyboard}")
+            return 1
+
+        with open(path, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+
+        print(f"[1/4] 读取分镜: {os.path.basename(path)}")
 
     # ---------- 2. 校验 ----------
+    # 两条输入路径都在这里汇合，好处是"校验 → 报告被丢弃的参数 → 渲染"只有一份代码。
+    # LLM 路径其实在 llm.generate_storyboard() 内部已经校验过一遍（不过就不放行），
+    # 这里对同一份原始 JSON 再走一次是幂等的，不重复花钱，只是让下游逻辑统一。
     t0 = time.time()
     try:
         sb = schema.validate(raw, templates.TEMPLATE_REGISTRY)
@@ -238,7 +318,7 @@ def main():
         else:
             print(f"      [WARN] {info['reason']}，公式将退化为纯文本")
 
-    name = os.path.splitext(os.path.basename(path))[0]
+    name = name or os.path.splitext(os.path.basename(path))[0]
     py_path = os.path.join(OUTPUT, f"{name}_scene.py")
     renderer.render_to_file(sb, py_path, use_latex=use_latex,
                            cn_font=args.font, fast=args.fast)

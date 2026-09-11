@@ -1,3 +1,6 @@
 .vscode/
 output/
-storyboard/__pycache__/
+__pycache__/
+
+# LLM 密钥（llm.local.json 里可能写着 api_key，绝不进 git）
+llm.local.json

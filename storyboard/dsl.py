@@ -1333,9 +1333,16 @@ class _Builder:
         return "[-5, 5]"
 
     def _mk_plot(self, el):
+        # 注意：只能用 set_stroke(opacity=...)，绝不能用 set_opacity()。
+        # 曲线是开放路径，set_opacity() 会连 fill_opacity 一起拉满，
+        # 而 VMobject 填充开放路径时会按「首尾相连」当封闭区域来填 ——
+        # 于是函数图像会变成一个实心块（y=x**2 看着像个实心半圆），
+        # 而且 opacity 默认 1.0，这条 bug 是必现的，不是参数写错才触发。
         return (f'{_V}{el["axes"]}.plot(lambda x: {self._expr_call(el["expr"])}, '
                 f'x_range={self._xr(el)}, color={_color(el["color"])}, '
-                f'stroke_width={_num(el["stroke_width"])}).set_opacity({_num(el["opacity"])})')
+                f'stroke_width={_num(el["stroke_width"])})'
+                f'.set_stroke(opacity={_num(el["opacity"])})'
+                f'.set_fill(opacity=0)')
 
     def _mk_parametric(self, el):
         tr = self._rng(el["t_range"])
