@@ -93,6 +93,65 @@ def _check_label(s, scene_id, field):
     return s[:120]
 
 
+def _norm_brief(v):
+    """
+    `brief`：给用户看的文字回答（2026-09-12 新增，供前端流式显示）。
+
+    刻意宽松 —— 它不参与渲染，缺了只是"少一句话"。500 字符上限是按
+    "2~3 句话"给的余量，超了截断而不是报错（报错会让整条生成白跑）。
+    """
+    if v is None:
+        return ""
+    if not isinstance(v, str):
+        v = str(v)
+    return v.strip()[:500]
+
+
+def _norm_intent(v):
+    """
+    `intent`：propose = 出大纲并等确认渲染；none = 纯概念问答，只回文字。
+
+    只有明确写 "none" 才当 none，其余（含缺失、写错）一律按 propose ——
+    默认值偏"多做一步"，因为漏掉动画比多做一次大纲更容易被用户发现。
+    """
+    return "none" if str(v).strip().lower() == "none" else "propose"
+
+
+def _norm_outline(v):
+    """
+    `outline`：大纲（前端确认页展示的那一份）。每项 = {id,title,durationSec,summary}。
+
+    这里和 scenes 的态度相反：**宽松**。大纲是"给人看的计划"，缺字段就用默认值补齐，
+    不因为一个 summary 没写就把整份分镜判死 —— 而 scenes 少一个 id 就会静默画错，
+    所以那边必须严格。宽松与严格的分界线就是"错了会不会静默失败"。
+    """
+    if not isinstance(v, list):
+        return []
+    out = []
+    for i, item in enumerate(v):
+        if not isinstance(item, dict):
+            continue
+        try:
+            dur = float(item.get("durationSec", 6.0))
+        except (TypeError, ValueError):
+            dur = 6.0
+        if not (0.5 <= dur <= 60.0):
+            dur = 6.0
+        try:
+            sid = int(item.get("id", i + 1))
+        except (TypeError, ValueError):
+            sid = i + 1
+        out.append({
+            "id": sid,
+            "title": str(item.get("title", "") or f"分镜 {i + 1}")[:60],
+            "durationSec": dur,
+            "summary": str(item.get("summary", ""))[:200],
+        })
+        if len(out) >= 12:
+            break
+    return out
+
+
 def validate(storyboard: dict, registry: dict) -> dict:
     """
     校验并规范化分镜 JSON。返回规范化后的 dict。
@@ -101,9 +160,30 @@ def validate(storyboard: dict, registry: dict) -> dict:
     if not isinstance(storyboard, dict):
         raise SchemaError("分镜必须是 JSON 对象")
 
+    intent = _norm_intent(storyboard.get("intent"))
     scenes = storyboard.get("scenes")
-    if not isinstance(scenes, list) or not scenes:
-        raise SchemaError("缺少 scenes 数组或为空")
+    if not isinstance(scenes, list):
+        raise SchemaError(
+            '缺少 scenes 数组（纯概念问答也要显式给空数组 []，并把 intent 设为 "none"）'
+        )
+
+    # 纯概念问答：模型按 prompt 给 intent=none + 空 scenes，这是**合法结果**，不是错误。
+    # 不加这个分支的话，llm.generate_storyboard() 会把一次正确的回答判成校验失败，
+    # 然后带着"scenes 不能为空"的错误回灌去逼模型编动画 —— 完全跑偏。
+    if not scenes:
+        if intent == "none":
+            return {
+                "title": str(storyboard.get("title", ""))[:60],
+                "problem_type": str(storyboard.get("problem_type", "generic"))[:40],
+                "brief": _norm_brief(storyboard.get("brief")),
+                "intent": "none",
+                "outline": _norm_outline(storyboard.get("outline")),
+                "scenes": [],
+            }
+        raise SchemaError(
+            "scenes 为空：要出动画请至少给 1 个分镜；"
+            '如果是纯概念问答，请把 intent 设为 "none"'
+        )
 
     if len(scenes) > 12:
         raise SchemaError(f"分镜数量过多（{len(scenes)}），上限 12 个")
@@ -111,6 +191,10 @@ def validate(storyboard: dict, registry: dict) -> dict:
     out = {
         "title": str(storyboard.get("title", ""))[:60],
         "problem_type": str(storyboard.get("problem_type", "generic"))[:40],
+        # ---- brief / intent / outline：对话层需要的三个字段（见 docs/前端接入-后端改造清单.md §3）----
+        "brief": _norm_brief(storyboard.get("brief")),
+        "intent": intent,
+        "outline": _norm_outline(storyboard.get("outline")),
         "scenes": [],
     }
 

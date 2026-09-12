@@ -240,6 +240,9 @@ def main():
     ap.add_argument("--problem", default="",
                     help="直接给题目文本，由大模型生成分镜（不用手写 JSON）")
     ap.add_argument("--problem-file", default="", help="题目文本文件（UTF-8）")
+    ap.add_argument("--profile", default="",
+                    help="用 llm.local.json 里的哪个模型档案（profiles 下的键）。"
+                         "不给就用文件里 active 指定的那个；也可用环境变量 MSB_LLM_PROFILE")
     ap.add_argument("--provider", default="",
                     help=f"LLM 厂商预设: {sorted(llm.PROVIDERS)}")
     ap.add_argument("--model", default="", help="模型名（不给则用厂商预设）")
@@ -254,12 +257,37 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=0,
                     help="单次回复 token 上限，0 = 用默认 8192")
     ap.add_argument("--no-json-mode", action="store_true",
-                    help="不要求接口强制 JSON 输出（部分厂商不支持 response_format）")
+                    help="不要求接口强制 JSON 输出（部分厂商不支持 response_format）。"
+                         "不加此参数时按 llm.local.json / MSB_LLM_JSON_MODE 的设置走")
     ap.add_argument("--rules", default="",
                     help="追加给分镜师的额外要求，如「多用 tracker 做动态演示」")
+    ap.add_argument("--replay", action="store_true",
+                    help="回放模式：命中 output/_llm/calls.jsonl 里的同输入留档就直接用，"
+                         "不再调模型（省钱；等价于环境变量 MSB_LLM_REPLAY=1）")
+    ap.add_argument("--show-last-reply", action="store_true",
+                    help="打印最近一次留档的模型回复原文（拿来手工取分镜 JSON 最方便）")
+    ap.add_argument("--llm-stats", action="store_true",
+                    help="统计 LLM 留档：各用途调用次数 / 耗时 / token")
     ap.add_argument("--name", default="",
                     help="输出文件名前缀（LLM 模式默认按时间戳命名）")
     args = ap.parse_args()
+
+    # ---- 与 LLM 留档有关的三个"只看不跑"的出口，放在最前面 ----
+    if args.show_last_reply:
+        text = llm.llm_log.last_reply()
+        if not text:
+            print(f"[FAIL] 留档里还没有成功的回复：{llm.llm_log.calls_path()}")
+            return 1
+        print(text)
+        return 0
+    if args.llm_stats:
+        llm.llm_log._main()
+        return 0
+    if args.replay:
+        # 显式打开回放。这里只改进程环境，不动配置文件 —— 回放是"这一次运行"的选择，
+        # 不该被写进 llm.local.json 长期生效（那会变成更隐蔽的静默失效）。
+        os.environ["MSB_LLM_REPLAY"] = "1"
+        print(f"[REPLAY] 已开启回放：命中留档就不再调模型（{llm.llm_log.calls_path()}）")
 
     if args.spec:
         print(dsl.describe())
@@ -288,18 +316,24 @@ def main():
             cfg = llm.resolve_config(
                 provider=args.provider, model=args.model, base_url=args.base_url,
                 api_key=args.api_key, temperature=args.temperature,
-                max_tokens=args.max_tokens or None)
+                max_tokens=args.max_tokens or None,
+                profile=args.profile or None)
         except llm.LLMError as e:
             print(f"[FAIL] LLM 配置有误:\n{e}")
             return 4
 
         preview = problem[:60] + ("..." if len(problem) > 60 else "")
-        print(f"[1/4] 题目 → 分镜（{cfg['provider']} / {cfg['model']}）: {preview}")
+        # 档案名也打出来：多档案下"到底用了哪一档"是最容易搞错的事
+        print(f"[1/4] 题目 → 分镜（{cfg['provider']} / {cfg['model']} / "
+              f"档案 {cfg.get('profile') or llm.DEFAULT_PROFILE}）: {preview}")
         t_llm = time.time()
         try:
             res = llm.generate_storyboard(
                 problem, cfg, templates.TEMPLATE_REGISTRY,
-                max_attempts=args.attempts, json_mode=not args.no_json_mode,
+                max_attempts=args.attempts,
+                # 没显式给 --no-json-mode 就传 None，让配置说了算（以前传 not False
+                # = True，会把 llm.local.json 里的 "json_mode": false 覆盖掉）
+                json_mode=False if args.no_json_mode else None,
                 extra_rules=args.rules)
         except llm.LLMError as e:
             print(f"[FAIL] 分镜生成失败:\n{e}")
@@ -318,6 +352,9 @@ def main():
             json.dump(res["raw"], f, ensure_ascii=False, indent=2)
         print(f"      分镜已保存: {path}")
         print(f'      （要改画面就手改这份 JSON，再 python generate.py "{path}" 重跑）')
+        # 全部轮次的原始回复都在留档里（含没通过校验的中间轮）——调 prompt 时
+        # "上一版错在哪"就靠它，重跑同样的输入加 --replay 还能不再花钱。
+        print(f"      调用留档: {llm.llm_log.calls_path()}（--llm-stats 看统计）")
         raw = res["raw"]
     else:
         # 1b. 手写 JSON 路径

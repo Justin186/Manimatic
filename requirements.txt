@@ -1,2 +1,12 @@
+# 渲染管线（CLI 与 api/ 共用）
 manim>=0.19.0
 numpy>=1.24
+
+# HTTP 服务层（api/）。CLI 不用装这两个也能跑。
+#
+# 为什么没有 sse-starlette：它默认输出 CRLF 分隔（\r\n\r\n），而前端
+# web/src/lib/sse.ts 用 buffer.indexOf("\n\n") 切事件 —— CRLF 里没有连续两个 \n，
+# 结果是一个事件都切不出来（连接正常、日志正常、UI 不动）。所以 api/events.py
+# 自己拼这 3 行 SSE，既省一个依赖，也省一类极难排查的分隔符不匹配 bug。
+fastapi>=0.110
+uvicorn>=0.27

@@ -259,6 +259,14 @@ def render_split(storyboard: dict,
             use_latex=env["use_latex"],
             cn_font=cn_font,
             helper=dsl.RUNTIME_HELPER,
+            # 拆分渲染时每个文件只有一个分镜，不存在"分镜边界"，
+            # 所以 SECTIONS 恒为 False（分段由 generate.py 用 ffmpeg 拼接完成）。
+            #
+            # ⚠️ 2026-09-12 补：这两个占位符此前**漏传**了，于是 HEADER.format() 直接
+            #    抛 KeyError: 'sections_flag' —— 也就是 `generate.py --split` 整条路
+            #    从写下那天起就是坏的（默认路径不走 render_split，所以一直没暴露）。
+            sections_flag=False,
+            sections_total=0,
             body=f"        # ---- {label} ----\n" + code,
         )
         _check_syntax(src)

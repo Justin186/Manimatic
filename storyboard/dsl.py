@@ -930,6 +930,19 @@ def _norm_action(ac, declared, trackers, where):
         if not (0.05 <= out["time"] <= 20):
             raise DSLError(f"{where}.time: {out['time']} 超出 [0.05, 20]")
 
+    if do == "parallel":
+        subs = ac.get("actions")
+        if not isinstance(subs, list) or not subs:
+            raise DSLError(f"{where}: parallel 需要非空的 actions 数组（子动作）")
+        # 子动作要**递归**规范化，并且原样带进返回值。
+        # 以前这里没有这段，actions 就被丢掉了；而 act() 与时长估算都读 ac["actions"]，
+        # 于是 parallel 变成"写了却什么都没做"：不报错、不上屏、只吐一行注释 ——
+        # 最典型的静默失败（2026-09-12 发现）。
+        out["actions"] = [
+            _norm_action(s, declared, trackers, f"{where}.actions[{i}]")
+            for i, s in enumerate(subs)
+        ]
+
     if do == "tracker_to":
         v = _as_num_or_ref(ac.get("to", 1.0), f"{where}.to")
         if isinstance(v, str):
@@ -1525,6 +1538,9 @@ class _Builder:
             )
             return
         if do == "parallel":
+            # 注意：这里是**顺序**展开成多条 self.play(...)，不是真并行
+            # （真并行要先把每条子动作编译成"动画表达式"而不是直接写行，属于较大的重构）。
+            # 语义上仍比之前好：以前 actions 在规范化阶段就被丢掉了，整段就是空转。
             for sub in ac.get("actions", []):
                 self.lines.append(f"        # >> parallel > {sub.get('do', '?')}")
                 self.act(sub)
@@ -1652,6 +1668,23 @@ class _Builder:
         raise DSLError(f"动作 {do!r} 没有对应实现（spec 与实现不一致）")
 
 
+def _est_action_time(ac):
+    """
+    估算一个动作真正占用的时长（供"软时长"补 wait 用）。
+
+    注意 parallel：_Builder.act() 目前是把子动作**顺序**编译成多条 self.play(...) 的，
+    所以这里按"求和"估才和实际一致。等哪天把 parallel 改成真并行（一条 self.play 里带
+    多个动画、取子动作 run_time 的 max），这里必须同步改成 max —— 两处是一对，
+    改一处不改另一处，分镜就会莫名提前结束或莫名拖一截。
+    """
+    if ac["do"] == "wait":
+        return float(ac["time"])
+    if ac["do"] == "parallel":
+        return sum(_est_action_time(s) for s in ac.get("actions") or [])
+    rt = ac.get("run_time") or ACTION_SPEC[ac["do"]]["run_time"]
+    return float(rt) if rt is not None else 0.0
+
+
 def build_scene(scene: dict, env: dict) -> str:
     """把一个 v2 分镜（elements + timeline）编译成 construct() 体内的代码。"""
     b = _Builder(env)
@@ -1667,22 +1700,7 @@ def build_scene(scene: dict, env: dict) -> str:
 
     # 软时长：timeline 跑完还没到 duration 就补 wait，保证节奏不赶
     if scene.get("duration"):
-        est = 0.0
-        for ac in scene["timeline"]:
-            if ac["do"] == "wait":
-                est += ac["time"]
-            elif ac["do"] == "parallel":
-                # parallel 取所有子动作的 max（它们是并行播放的）
-                sub_max = 0.0
-                for sub in ac.get("actions", []):
-                    if sub["do"] == "wait":
-                        sub_max = max(sub_max, sub["time"])
-                    else:
-                        sub_max = max(sub_max, sub.get("run_time") or ACTION_SPEC[sub["do"]]["run_time"] or 0)
-                est += sub_max
-            else:
-                rt = ac.get("run_time") or ACTION_SPEC[ac["do"]]["run_time"]
-                est += rt if rt is not None else 0
+        est = sum(_est_action_time(ac) for ac in scene["timeline"])
         pad = round(float(scene["duration"]) - est, 2)
         if pad > 0.1:
             b.lines.append(f"        self.wait({pad})")
@@ -1721,6 +1739,12 @@ def describe(include_place=True) -> str:
     out.append("可用键：`edge`(up/down/left/right) `corner`(UL/UR/DL/DR) "
                "`next_to`({of,direction,buff,aligned}) `at_point` "
                "`shift`([dx,dy]) `scale` `rotate`(度) `center` `fit_width` `z`")
+    # ⚠️ 实测（2026-09-12）：不写这句话，模型会写出 `"place":[{"center"}]` —— 看着像
+    # JSON、其实少了个 `: true`，直接解析失败。`{ "center" }` 是 JS 简写语法，
+    # 不是 JSON；只在键名列表里提过 `center`，模型就会照着简写。必须给真值示例。
+    out.append("⚠️ 以上键都是**普通 JSON 键，必须带值**："
+               "`{\"center\": true}`（不是 `{\"center\"}`）、`{\"scale\": 0.8}`、"
+               "`{\"z\": 5}`。写成 `{\"center\"}` 不是合法 JSON，解析会直接失败。")
     out.append("点坐标三种写法：`[x,y]` / `{\"ref\":\"ax\",\"x\":2,\"y\":3}`（坐标系里的点）"
                " / `{\"of\":\"g1\",\"anchor\":\"top\"}`（另一元素的锚点）")
     out.append("")

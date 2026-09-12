@@ -3,5 +3,8 @@
 output/
 __pycache__/
 
-# LLM 密钥（llm.local.json 里可能写着 api_key，绝不进 git）
+# LLM 密钥与第三方工具导出的凭据（里面通常带 apiKey / providerKeys，绝不进 git）
 llm.local.json
+oaicopilot-config-*.json
+*apikey*.json
+*api-key*.json
