@@ -1,15 +1,21 @@
-# MathStoryboard 项目知识库
+# Manimatic 项目知识库
 
 > **目的**：让任何人在 5 分钟内 get up to speed——不用翻聊天记录，不用问"之前为什么这么定"。
 
-最后更新：2026-09-11 (D+3)
+最后更新：2026-09-11（D+3）
+本次校正：定位收敛为「题目 → 讲解动画」（决策 8，拍题降级）；第八节标为历史；章节编号修复
 
 ---
 
 ## 一、项目一句话
 
-**拍题 → 分镜 → Manim 动画**，把"讲解题"从静态文字/语音升级为可编辑的推导视频。
-核心定位：**学生自拍错题 → AI 输出解题步骤 + Manim 动画**。
+**题目 → 分镜 JSON → Manim 动画**，把"讲解题"从静态文字/语音升级为可编辑的推导视频。
+
+核心定位：**AI 把一道题变成一段带推导过程的讲解动画**，中间产物（分镜 JSON）可编辑、可重跑。
+
+> 输入现状：**文本题目**（`--problem` / `--problem-file`）。
+> **拍照识题不是核心路径** —— 2026-09-11 起定位收敛为"**题目 → 讲解动画**"，
+> OCR 降级为可有可无的便捷入口，不阻塞主线（见第十节待办）。
 
 ---
 
@@ -103,7 +109,11 @@
 1. `--fast`：坐标轴刻度改用 Text 渲染 → LaTeX 编译 24→16 次，**60s → 39s**
    （有了预热之后这项变成可选）
 2. 降帧率：帧率比分辨率更花钱（720p15 与 480p15 几乎一样快，720p30 才明显变慢）
-3. `--parallel` 增量渲染：重跑同一份分镜 **0.2s**（首次反而更慢，因为每进程要重复付启动+LaTeX 开销）
+3. 增量渲染：重跑同一份分镜 **0.2s**（靠 `_parts` 里的源码/产物比对跳过）
+   > 2026-09-12 更正：早期写的 `--parallel`（每分镜一个进程）是**负优化**，
+   > 8 分镜实测 18.0s vs 默认 12.3s。瓶颈是内存带宽不是 CPU。
+   > 分镜产物现在由默认路径的 `--save_sections` 提供，代价只有 0.5s。
+   > 详见 README「分镜级渲染」。
 
 **720p 的结论（给担心画质的人）**：720p 几乎免费，花钱的是帧率。
 8 分镜 / 71 秒成片的实测（本机 VSCode 终端）：
@@ -140,33 +150,62 @@
 
 **待实测**：一次成功率 / 三次内成功率（留到 D7 的 30 题评测跑出数字）。
 
+### 决策 8：定位收敛为「题目 → 讲解动画」，拍照搜题降级为可选（2026-09-11）
+
+**原表述**（本文件早期版本、README 旧版）：
+
+> 核心定位：**学生自拍错题 → AI 输出解题步骤 + Manim 动画**。
+
+**为什么不合适**：这个说法把「拍照」摆在了核心位置，但它其实只是**输入环节的一种便利形式**：
+
+1. 真正的价值在「题目 → 带推导过程的动画」这段能力，跟题目从哪来没关系；
+2. OCR 是外部 API 依赖，接入成本不低，而收益只是"少打几个字"；
+3. 把它当核心会让 D3 变成阻塞项 —— 而它本不该阻塞任何东西。
+
+**现在的定位**：**AI 把一道题变成一段带推导的讲解动画**，中间产物（分镜 JSON）可编辑、可重跑。
+输入以**文本题目**为主（`--problem` / `--problem-file`）。
+
+**影响**：D3（OCR 拍照识题）从里程碑降级为可选待办 —— **不排期、不阻塞、可有可无**；
+文档中"拍题 / 自拍错题 / 错题讲解"一类措辞已统一改掉。
+
 ---
 
 ## 三、文件结构
 
 ```
-D:\MathStoryboard\
-├── README.md               项目说明、跑法、模板列表
-├── check_env.py            环境自检（manim + LaTeX + MathTex 实测）
-├── generate.py             主入口：分镜 JSON → 校验 → 代码 → MP4
-├── requirements.txt
-├── storyboard/
-│   ├── __init__.py
-│   ├── dsl.py              ⭐ 元素库+动作库+构建器（DSL 写法核心，接手先读它的顶部注释）
-│   ├── templates.py        9 个旧模板（确定性代码，仅兼容旧分镜，不再新增）
-│   ├── schema.py           分镜 JSON 校验（拦截静默失败）
-│   ├── renderer.py         JSON → Manim 源码（含 LaTeX 自动分流）
-│   ├── llm.py              LLM 接入：prompt + OpenAI 兼容调用 + 校验失败回灌重试
-│   └── latex_env.py        MiKTeX/TeX Live 自动探测与 PATH 注入
-├── examples/
-│   ├── quadratic_transform.json
-│   ├── derivative_meaning.json
-│   └── _bad_case_demo.json
-├── output/
-│   ├── videos/             渲染产物（按 quality 分子目录）
-│   └── *_scene.py          自动生成的 Manim 场景（不要手改）
-└── media/                  （Manim 默认输出，可忽略）
+D:\Manimatic\
+├── MathStoryboard\          ← 本仓库（Manimatic 后端）
+│   ├── HANDOFF.md           ⭐ 交接文档（前端 → 后端，接手先读）
+│   ├── README.md            项目说明、跑法、模板列表
+│   ├── PROJECT_KNOWLEDGE.md ⭐ 本文件
+│   ├── docs/                设计文档（前端架构 / 后端改造清单 / 实时交付契约）
+│   ├── check_env.py         环境自检（manim + LaTeX + MathTex 实测）
+│   ├── generate.py          主入口：分镜 JSON → 校验 → 代码 → MP4
+│   ├── run_all.bat          一键渲染 15 题测试集
+│   ├── requirements.txt
+│   ├── storyboard/
+│   │   ├── __init__.py
+│   │   ├── dsl.py           ⭐ 元素库+动作库+构建器（DSL 写法核心，接手先读它的顶部注释）
+│   │   ├── templates.py     9 个旧模板（确定性代码，仅兼容旧分镜，不再新增）
+│   │   ├── schema.py        分镜 JSON 校验（拦截静默失败）
+│   │   ├── renderer.py      JSON → Manim 源码；sections=True 时边渲边切
+│   │   ├── render_worker.py 仅服务于 --split（调试单分镜），不是主路径
+│   │   ├── llm.py           LLM 接入：prompt + OpenAI 兼容调用 + 校验失败回灌重试
+│   │   ├── tex_batch.py     LaTeX 批处理预热（清缓存首渲 60s → 12.9s）
+│   │   └── latex_env.py     MiKTeX/TeX Live 自动探测与 PATH 注入
+│   ├── examples/            分镜 JSON（free_*.json 是 DSL 写法；a1~e3 是 15 题测试集）
+│   ├── eval/                测试题集 + 判对判错清单 + Bug 清单
+│   └── output/
+│       ├── videos/          最终成片（按 quality 分子目录）
+│       ├── _parts/<name>/   ⭐ 分镜级片段（<name>_s{i}.py + m{i}/ + concat.txt）
+│       ├── images/ Tex/ texts/ Manim 中间产物
+│       └── *_scene.py       自动生成的 Manim 场景（不要手改）
+└── web\                     ← git repo B（Next.js 前端，GitHub 名 manimatic-web）
 ```
+
+> `output/_parts/` 是理解渲染管线的关键：每个分镜一份独立可渲染的 `.py`
+> 加一个独立 media 目录，最后靠 ffmpeg concat 拼接。增量缓存也在这层
+> （源码没变 + 片段存在 → 跳过），所以"只改一个分镜"不用重跑整条链。
 
 ---
 
@@ -276,9 +315,18 @@ Tex 用 `None`。
 
 ---
 
-## 八、5 个核心模板（D2 定稿）
+## 八、5 个核心模板（D2 定稿 —— ⚠️ 已被决策 5 取代）
 
-`title_card` / `summary_card` 是通用外壳，不算题型模板。**核心 5 个**：
+> **本节是历史记录，不要照着施工。**
+> 2026-09-10 的**决策 5** 已经把"从 9 个模板里选一个"改成「**元素库 + 时间线 DSL**」，
+> 模板退化成纯兼容层（`storyboard/templates.py`，只读不再新增）。
+> 现在扩展能力的正确姿势是**往 `dsl.py` 的 ELEMENT_SPEC / ACTION_SPEC 里加元素和动作**，
+> 不是加模板。
+>
+> 下面这张表保留下来有两个用处：① 说明当初的边界在哪；② 这 5 类题型仍然值得
+> 在 DSL 下有对等的覆盖，可以用作回归测试的题型清单。
+
+`title_card` / `summary_card` 是通用外壳，不算题型模板。**当时的 5 个**：
 
 | 模板 | 覆盖题型 | 说明 |
 |---|---|---|
@@ -315,27 +363,39 @@ Tex 用 `None`。
 
 ---
 
-## 十、后续待办（D2–D10 排期）
+## 十、后续待办
 
-- [x] **D1** ✅：环境就绪，2 段 demo 渲染成功
-- [ ] **D2**：5 个核心模板定稿 + 15 题测试集 + 判对判错清单初版
-- [ ] **D3**：接入 OCR（百度「试卷切题识别」API 验证公式输出格式）
-- [x] **D4** ✅：接 LLM 分镜生成（OpenAI 兼容，预设 deepseek/qwen/glm/moonshot/openai；见决策 7）
-- [ ] **D5**：补 2 个新模板（几何证明、数列求和）
-- [ ] **D6**：接前端（uni-app H5，HBuilderX 编译）
+- [x] **D1** ✅ 环境就绪，2 段 demo 渲染成功
+- [x] **D2** ✅ 5 个核心模板定稿 + 15 题测试集 + 判对判错清单初版
+- [x] **D4** ✅ 接 LLM 分镜生成（OpenAI 兼容 + 校验失败回灌重试，见决策 7）
+- [x] **D5** ✅ **改成「元素库 + 时间线 DSL」**（决策 5）
+      原计划是"补 2 个新模板"，实际做的是把模板降级为兼容层，
+      能力改成 20 元素 × 26 动作的自由组合；
+      顺带完成 LaTeX 批处理预热（首渲 60s → 12.9s）与分镜级并行渲染（4 分镜 48s → 11s）
+- [ ] **D6** 🔜 **接前端**（当前主线）
+      - 选型已定：**Web 优先（React 生态）+ Capacitor 出包双端**，
+        不再走 uni-app / HBuilderX / 若依
+      - 后端有三块空白要先补：**HTTP 服务层、进度事件流、分阶段 LLM 输出**
+        （详见 README 第七节）
 - [ ] **D7**：扩到 30 题 → 归纳正式 Rubric → 评测 + 修 Bad Case
 - [ ] **D8**：答辩 PPT + 演示视频预生成
 - [ ] **D9**：彩排
 - [ ] **D10**：答辩
 
+**已降级 / 搁置**
+
+- **D3 拍照识题（OCR）**：**不再是核心路径**，降为可选。
+  定位已收敛为"题目 → 讲解动画"，题库入口以**文本题目**为主（`--problem`）。
+  OCR 只是便捷入口，可有可无，不影响主线，不要为它排期。
+
 ---
 
-## 九、给后续 AI 协作者的提示词模板
+## 十一、给后续 AI 协作者的提示词模板
 
 如果你需要让另一个 AI 接手这个项目，把下面这段喂给它：
 
 ```
-你在接手一个 Manim 讲解视频生成项目（MathStoryboard）。
+你在接手一个 Manim 讲解视频生成项目（Manimatic，后端仓库名为 MathStoryboard）。
 
 **核心架构（不许改）**：
 - 大模型只输出受 Schema 约束的分镜 JSON，绝不写 Manim 代码
@@ -351,11 +411,12 @@ Tex 用 `None`。
 - latex_env.py 会自动注入 PATH
 
 **先看这些文档**（顺序很重要）：
-1. D:\MathStoryboard\PROJECT_KNOWLEDGE.md（本文件）
-2. D:\MathStoryboard\storyboard\dsl.py（顶部注释讲清了为什么改、五道闸是什么）
-3. D:\MathStoryboard\README.md
-4. D:\MathStoryboard\examples\free_derivative.json （DSL 写法的实际分镜）
-5. D:\MathStoryboard\examples\free_pythagorean.json（几何题，老模板做不到）
+0. D:\Manimatic\MathStoryboard\HANDOFF.md（交接文档：现状 + 后端待办清单，最省时间的一份）
+1. D:\Manimatic\MathStoryboard\PROJECT_KNOWLEDGE.md（本文件）
+2. D:\Manimatic\MathStoryboard\storyboard\dsl.py（顶部注释讲清了为什么改、五道闸是什么）
+3. D:\Manimatic\MathStoryboard\README.md
+4. D:\Manimatic\MathStoryboard\examples\free_derivative.json （DSL 写法的实际分镜）
+5. D:\Manimatic\MathStoryboard\examples\free_pythagorean.json（几何题，老模板做不到）
 
 **红线**：
 - 禁止让 LLM 写 Manim 代码（架构原则，决策 1）
@@ -368,14 +429,15 @@ Tex 用 `None`。
 
 ---
 
-## 十、答疑：常被问的"为什么不"
+## 十二、答疑：常被问的"为什么不"
 
 | 问题 | 答 |
 |---|---|
 | 为什么不直接让 LLM 生成 Manim 代码？ | 静默失败 + 145 个 GL/CE 不兼容 API |
 | 为什么不装 ctex 支持中文公式？ | 增加安装复杂度、收益小——用 caption 字段放中文更简单 |
 | 为什么不接真实数据做"任意题讲解"？ | 10 天项目，先稳后广。MVP 用 5 个模板覆盖 80% 题目 |
-| 为什么不直接用 Math-To-Manim（GitHub 2.5k stars）？ | 它们做科普视频，我们做错题讲解；我们的分镜可编辑、有步骤分析 |
+| 为什么不直接用 Math-To-Manim（GitHub 2.5k stars）？ | 它们做科普视频，我们做**讲题**（题目 → 带推导步骤的动画）；我们的分镜可编辑、可重跑 |
+| 为什么不做拍照搜题？ | 定位是"题目 → 讲解动画"，输入用文本题目就够；OCR 只是入口的便利性，不解决核心问题 |
 | 为什么不装 TinyTeX 而用 MiKTeX？ | 你已经装了 MiKTeX，没必要换。TinyTeX 适合精简场景 |
 | 为什么不接 SymPy 做最终答案校验？ | 前沿模型数学已 95–100%，校验是锦上添花不是必需品 |
 

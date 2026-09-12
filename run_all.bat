@@ -2,13 +2,13 @@
 REM MathStoryboard - render all 15 test problems
 REM Double-click to run. Requires: D:\Miniconda\envs\manim
 
-cd /d D:\MathStoryboard
+cd /d D:\Manimatic\MathStoryboard
 set PY=D:\Miniconda\envs\manim\python.exe
 set PYTHONIOENCODING=utf-8
 
 echo ============================================
 echo  Rendering 15 test problems
-echo  Output: D:\MathStoryboard\output\videos\
+echo  Output: D:\Manimatic\MathStoryboard\output\videos\
 echo ============================================
 echo.
 

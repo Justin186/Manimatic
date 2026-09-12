@@ -46,11 +46,27 @@ def quality_args(args):
 
 def render_parallel(sb, name, args, use_latex, quality_dir):
     """
-    每个分镜一个 manim 进程并行渲染，最后用 ffmpeg 拼接。
+    分镜级渲染：每个分镜单独产出 mp4，最后用 ffmpeg 拼成整条。
 
-    为什么不用 GPU：实测像素量涨 4.3 倍（480p15→720p30）耗时只涨 12%，
-    说明光栅化只占总耗时约 12%，换 GPU 天花板极低；而瓶颈在 Python 侧的
-    mobject 计算，多核并行才是对症的 —— 4 分镜 48.1s → 11.4s（20 核）。
+    ⚠️ 实现于 2026-09-12 重写，原因见 README「分镜级渲染」一节：
+    旧实现是"每个分镜起一个 manim 进程"，看起来像是能吃掉 20 核，实测却最慢 ——
+    瓶颈是**内存带宽**这个被所有进程共享的资源：单进程能吃 35 GB/s，8 个进程并行
+    时每个只剩 7.2 GB/s（整机上限约 58 GB/s 就封顶）。多开进程不会多出算力，
+    只会互相拖慢，外加每个进程都要重付一次 manim 初始化。
+    实测（free_product_rule，8 分镜，480p15）：
+        单进程整条渲染 12.2s ｜ 8 分镜 × 8 进程 18.0s ｜ 单进程内连渲 11.3s
+
+    因此改为：把待渲分镜分成 jobs 组，每组交给一个 storyboard.render_worker：
+      - **组内共用同一个渲染目录** —— manim 只初始化一次目录结构与 tex 缓存
+        （每个分镜一个全新目录要多付 ~0.4s/分镜，8 个分镜就是 3.9s）
+      - **整组公式合并成一次 LaTeX 预热** —— 原来是每个分镜各编译一遍
+        （8 次 × 0.7s ≈ 5.4s，合并后约 1s）
+      - 渲染在同一个进程里依次进行（场景初始化与模块缓存只付一次）
+      - 每个分镜渲完立刻把产物搬出共用目录，否则会被下一个分镜覆盖
+
+    jobs 默认 1（最快也最稳）；实测加到 2~4 还有小收益（此时带宽尚未跑满），
+    到 8 就转为负收益。产物固定落在 `_parts/<name>/segments/`，与 jobs 无关，
+    保证增量缓存的判断路径稳定。
 
     Returns:
         (ok: bool, elapsed: float)
@@ -58,18 +74,16 @@ def render_parallel(sb, name, args, use_latex, quality_dir):
     parts = renderer.render_split(sb, use_latex=use_latex,
                                   cn_font=args.font, fast=args.fast)
     parts_dir = os.path.join(OUTPUT, "_parts", name)
+    # 产物固定放在这里，与 --jobs 无关 —— 增量缓存的判断路径必须稳定
+    seg_root = os.path.join(parts_dir, "segments")
     os.makedirs(parts_dir, exist_ok=True)
-
-    jobs = args.jobs or min(len(parts), os.cpu_count() or 4, 8)
-    jobs = max(1, min(jobs, len(parts)))
 
     all_metas, todo, cached = [], [], 0
     for i, (sid, src) in enumerate(parts):
         stem = f"{name}_s{i}"
         py = os.path.join(parts_dir, f"{stem}.py")
-        media = os.path.join(parts_dir, f"m{i}")
-        seg = os.path.join(media, "videos", stem, quality_dir, "StoryboardScene.mp4")
-        item = (i, sid, py, media, stem)
+        seg = os.path.join(seg_root, stem, quality_dir, "StoryboardScene.mp4")
+        item = (i, sid, py, stem, seg)
         all_metas.append(item)
         # 增量：源码没变且片段已存在就跳过。
         # 这样"只重跑失败的那个分镜"不用把整条链重来一遍。
@@ -81,31 +95,68 @@ def render_parallel(sb, name, args, use_latex, quality_dir):
             f.write(src)
         todo.append(item)
 
-    print(f"[4/4] 并行渲染 {len(parts)} 个分镜（-q{args.quality}，并发 {jobs}"
+    jobs = max(1, min(args.jobs or 1, len(todo))) if todo else 1
+    # 每组一个渲染目录（组内共用）。共用的两个好处：
+    #   ① 整组公式能合并成一次 LaTeX 编译（原来是每个分镜各编译一遍）
+    #   ② manim 只需初始化一次目录结构与 tex 缓存（每个分镜一个全新目录要多付 ~0.4s）
+    # 组与组之间必须分开，否则多个 worker 会互相覆盖产物。
+    render_dirs = [os.path.join(parts_dir, f"media{k}") for k in range(jobs)]
+
+    print(f"[4/4] 分镜级渲染 {len(parts)} 个分镜（-q{args.quality}，{jobs} 个渲染进程"
           + (f"，{cached} 个命中缓存跳过" if cached else "") + ")...")
 
-    # 每个待渲染的分镜先各自预热 LaTeX（串行的，但换来并行阶段不再编译）
+    # LaTeX 预热：把该组所有分镜的源码合并后**一次性**编译
     if use_latex and not args.no_prewarm:
-        for (i, sid, py, media, stem) in todo:
-            with open(py, encoding="utf-8") as f:
-                tex_batch.prewarm(f.read(), media)
+        for k in range(jobs):
+            group = todo[k::jobs]
+            if not group:
+                continue
+            merged = []
+            for (i, sid, py, stem, seg) in group:
+                with open(py, encoding="utf-8") as f:
+                    merged.append(f.read())
+            tex_batch.prewarm("\n".join(merged), render_dirs[k])
 
+    sid_of = {i: sid for (i, sid, py, stem, seg) in all_metas}
+    worker = os.path.join(HERE, "storyboard", "render_worker.py")
     t1 = time.time()
     failures = []
-    for k in range(0, len(todo), jobs):
-        batch = todo[k:k + jobs]
-        procs = []
-        for (i, sid, py, media, stem) in batch:
-            procs.append((sid, subprocess.Popen(
-                [sys.executable, "-m", "manim", "render"] + quality_args(args) +
-                ["--disable_caching", "--media_dir", media, py, "StoryboardScene"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                encoding="utf-8", errors="replace", cwd=OUTPUT)))
-        for sid, p in procs:
+    procs = []
+
+    # 分组：第 k 组拿 todo[k::jobs]，轮转分配以便把较重的分镜摊开
+    for k in range(jobs):
+        group = todo[k::jobs]
+        if not group:
+            continue
+        tasks = [[py, render_dirs[k], i, seg]
+                 for (i, sid, py, stem, seg) in group]
+        procs.append(subprocess.Popen(
+            [sys.executable, worker,
+             "--tasks", json.dumps(tasks),
+             "--quality-dir", quality_dir,
+             "--quality", args.quality,
+             "--resolution", args.resolution or "",
+             "--fps", str(args.fps or 0)],
             # 中文 Windows 下必须显式 encoding/errors，否则 GBK 解码会崩掉读取线程
-            out, err = p.communicate(timeout=900)
-            if p.returncode != 0:
-                failures.append((sid, (err or out or "")[-1200:]))
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace", cwd=OUTPUT))
+
+    for p in procs:
+        out, err = p.communicate(timeout=1800)
+        # worker 每渲完一个分镜就打一行 "@@ {json}" —— 这里逐行解析，
+        # 将来接 SSE 时把这一层换成"边读边推"即可，协议不用动。
+        for line in (out or "").splitlines():
+            if not line.startswith("@@ "):
+                continue
+            try:
+                event = json.loads(line[3:])
+            except ValueError:
+                continue
+            if event.get("i") is not None and not event.get("ok"):
+                failures.append((sid_of.get(event["i"], event["i"]),
+                                 event.get("error", "")))
+        if p.returncode != 0 and not failures:
+            failures.append((-1, (err or out or "")[-1200:]))
     elapsed = time.time() - t1
 
     if failures:
@@ -119,12 +170,11 @@ def render_parallel(sb, name, args, use_latex, quality_dir):
           + (f"（另有 {cached} 个命中缓存）" if cached else ""))
 
     segs = []
-    for (i, sid, py, media, stem) in all_metas:
-        m = os.path.join(media, "videos", stem, quality_dir, "StoryboardScene.mp4")
-        if not os.path.exists(m):
-            print(f"[FAIL] 分镜 {sid} 未产出: {m}")
+    for (i, sid, py, stem, seg) in all_metas:
+        if not os.path.exists(seg):
+            print(f"[FAIL] 分镜 {sid} 未产出: {seg}")
             return False, elapsed
-        segs.append(m)
+        segs.append(seg)
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -166,10 +216,13 @@ def main():
     ap.add_argument("--keep-code", action="store_true", help="保留生成的 .py 文件")
     ap.add_argument("--spec", action="store_true",
                     help="打印分镜 DSL 规格（给大模型用的 prompt 片段）后退出")
-    ap.add_argument("--parallel", action="store_true",
-                    help="每个分镜开一个进程并行渲染再拼接（多核加速，实测 4 分镜 48s→11s）")
+    ap.add_argument("--split", action="store_true",
+                    help="拆分渲染：每个分镜独立渲染成 mp4，再用 ffmpeg 拼成整条。"
+                         "慢于默认路径（拆场景要重复付渲染器初始化），仅用于调试单个分镜")
     ap.add_argument("--jobs", type=int, default=0,
-                    help="并行渲染的并发数（默认 min(分镜数, CPU 核数, 8)）")
+                    help="配合 --split 使用：渲染进程数（默认 1，所有分镜在一个进程内连渲）。"
+                         "分成 --jobs 组、每组一个进程串行渲染组内分镜；"
+                         "加到 2~4 还有小收益，到 8 转为负收益（内存带宽封顶）")
     ap.add_argument("--fast", action="store_true",
                     help="快速模式：坐标轴刻度数字改用 Text 渲染，省掉大量 LaTeX 编译"
                          "（实测首次渲染 60s→39s，出片时再关掉）")
@@ -320,8 +373,18 @@ def main():
 
     name = name or os.path.splitext(os.path.basename(path))[0]
     py_path = os.path.join(OUTPUT, f"{name}_scene.py")
-    renderer.render_to_file(sb, py_path, use_latex=use_latex,
-                           cn_font=args.font, fast=args.fast)
+
+    # --split：走"拆分渲染 + ffmpeg 拼接"老路（每个分镜独立渲染）。
+    # 默认不走它 —— 见 README「分镜级渲染」：拆场景会重复付渲染器初始化，
+    # 比"一个 Scene 演到底 + manim 原生分段"慢 20%+。
+    if args.split:
+        renderer.render_to_file(sb, py_path, use_latex=use_latex,
+                                cn_font=args.font, fast=args.fast)
+    else:
+        renderer.render_to_file(sb, py_path, use_latex=use_latex,
+                                cn_font=args.font, fast=args.fast,
+                                sections=len(sb["scenes"]) > 1)
+
     n_lines = sum(1 for _ in open(py_path, encoding="utf-8"))
     print(f"[3/4] 生成 Manim 代码: {py_path}  ({n_lines} 行, LaTeX={use_latex})")
 
@@ -341,9 +404,7 @@ def main():
     os.makedirs(OUTPUT, exist_ok=True)
     quality_dir = quality_tag(args)
 
-    # 并行模式：每个分镜单独渲染再拼接。首次不划算（每进程都要重复付启动+LaTeX 开销），
-    # 但重跑时靠增量缓存能做到秒级。
-    if args.parallel and len(sb["scenes"]) > 1:
+    if args.split and len(sb["scenes"]) > 1:
         ok, elapsed = render_parallel(sb, name, args, use_latex, quality_dir)
         if not ok:
             return 3
@@ -356,31 +417,56 @@ def main():
               f"{elapsed / max(len(sb['scenes']), 1):.1f}s")
         return 0
 
-    print(f"[4/4] 渲染中（-q{args.quality}）...")
+    save_sections = not args.split and len(sb["scenes"]) > 1
+    if save_sections:
+        print(f"[4/4] 渲染中（-q{args.quality}，每个分镜渲完即出片）...")
+    else:
+        print(f"[4/4] 渲染中（-q{args.quality}）...")
     t1 = time.time()
+    # ⚠️ 这里不能用 subprocess.run(capture_output=True) —— 它要等进程结束才返回，
+    #    拿不到"渲好一段"的实时时机。必须 Popen + 逐行读 stdout。
+    # encoding / errors 也要显式指定：中文 Windows 的 locale 是 GBK，
+    #    而 manim 输出是 UTF-8，不指定会 UnicodeDecodeError 崩掉读取线程，
+    #    主流程卡死在 read 上（表面上像"渲染卡住"）。
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "manim", "render"]
+        + quality_args(args)
+        + ["--disable_caching",
+           "--media_dir", OUTPUT, py_path, "StoryboardScene"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        encoding="utf-8", errors="replace", cwd=OUTPUT, bufsize=1)
+
+    section_events = []
+    section_t0 = t1
+    for line in proc.stdout:
+        stripped = line.rstrip("\n")
+        if stripped.startswith("@@ "):
+            try:
+                evt = json.loads(stripped[3:])
+            except ValueError:
+                continue
+            if evt.get("section"):
+                section_events.append(evt)
+                mark = time.time()
+                print(f"      [分镜 {evt['section']}] 已完成 "
+                      f"{evt.get('duration', 0)}s  →  {os.path.basename(evt.get('video', ''))}"
+                      f"  （累计 {mark - section_t0:.1f}s）")
+            continue
+        # manim 自己的日志：只保留失败相关的，避免刷屏
+        if "error" in stripped.lower() or "Traceback" in stripped:
+            print("      " + stripped)
+
     try:
-        # encoding / errors 必须显式指定：
-        #   中文 Windows 的 locale 是 GBK，而 manim 输出的是 UTF-8。
-        #   不指定的话 subprocess 会用 GBK 解码 → UnicodeDecodeError，
-        #   读取线程直接崩掉，主流程卡死在 communicate() 上（表面上像"渲染卡住"）。
-        #   errors="replace" 是兜底：即使有解不出的字节也只替换，不让线程死。
-        r = subprocess.run(
-            [sys.executable, "-m", "manim", "render"]
-            + quality_args(args)
-            + ["--disable_caching",
-               "--media_dir", OUTPUT, py_path, "StoryboardScene"],
-            capture_output=True, text=True, timeout=900, cwd=OUTPUT,
-            encoding="utf-8", errors="replace",
-        )
-        elapsed = time.time() - t1
+        proc.wait(timeout=900)
     except subprocess.TimeoutExpired:
+        proc.kill()
         print("[FAIL] 渲染超时（>900 秒）")
         return 3
+    elapsed = time.time() - t1
+    r = proc  # 下面统一用 returncode / stdout
 
     if r.returncode != 0:
         print(f"[FAIL] 渲染失败（{elapsed:.1f}s）")
-        print("-" * 60)
-        print((r.stderr or r.stdout or "")[-2500:])
         return 3
 
     print(f"[OK] 渲染成功，耗时 {elapsed:.1f} 秒")
@@ -396,6 +482,23 @@ def main():
     if mp4:
         size = os.path.getsize(mp4) / 1024 / 1024
         print(f"\n输出: {mp4}  ({size:.2f} MB)")
+
+    # 分镜片段：渲染过程中每渲完一段就被场景自己合并导出（见 renderer.HEADER 的
+    # `section()`），这里只是把结果汇总展示，顺带把索引写到 sections/index.json，
+    # 供后端 / 前端直接消费（真实时长比大纲估算值准）。
+    if save_sections and section_events:
+        sections_dir = os.path.join(OUTPUT, "videos", f"{name}_scene",
+                                    quality_dir, "sections")
+        index = os.path.join(sections_dir, "index.json")
+        index_data = [
+            {"index": int(e["section"]) - 1,
+             "video": os.path.basename(e["video"]),
+             "duration": e.get("duration", 0.0)}
+            for e in section_events
+        ]
+        with open(index, "w", encoding="utf-8") as f:
+            json.dump(index_data, f, ensure_ascii=False, indent=2)
+        print(f"分镜片段: {len(index_data)} 段（渲染中实时交付）→ {sections_dir}")
 
     total = time.time() - t0
     print(f"总耗时: {total:.1f}s（含校验+生成+渲染）")

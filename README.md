@@ -1,6 +1,14 @@
-# MathStoryboard
+# Manimatic · 渲染服务
 
-把「分镜 JSON」确定性地渲染成数学讲解动画的 demo。
+> 仓库名 `MathStoryboard`。它是 **Manimatic** 的后端：把「分镜 JSON」确定性地渲染成数学讲解动画。
+
+> **前端配套项目在 `../web`（Next.js，GitHub 名 `manimatic-web`）** ——
+> SSE 契约见 `docs/前端接入-后端改造清单.md`，产品形态与决策见 `docs/Manimatic-前端架构设计.md`。
+> **接手请先读 `HANDOFF.md`**（前端 → 后端的交接文档）。
+>
+> ⚠️ **`docs/` 三份已有副本在前端仓库 `../web/docs/`** —— 它们内容面向前端，随前端仓库一起分发。
+> 两边并存、需手工同步：**契约（SSE 事件 / 产物格式 / 交付顺序）以本仓库为准，
+> 前端架构决策与改造章节以 `web/docs/` 为准**。改任何一份，请顺手改另一份。
 
 **核心思想**：不让大模型直接写 Manim 代码，而是让它输出受约束的分镜 JSON，
 由确定性渲染器翻译成代码。这样语法错误为 0、API 版本冲突为 0。
@@ -21,26 +29,32 @@
 
 ## 一、环境配置
 
-### 1. 创建 conda 环境（Python 3.11）
+### 1. conda 环境（已就绪：`manim`）
 
-你的 Miniconda 基础环境是 **Python 3.14，太新**，Manim 依赖可能有兼容问题，所以必须单独建环境。
+环境**已经建好了**，直接用，不用重建：
 
-**PowerShell：**
-```powershell
-D:\Miniconda\Scripts\conda.exe create -n mathstory python=3.11 -y
-D:\Miniconda\Scripts\conda.exe activate mathstory
-cd D:\MathStoryboard
-pip install -r requirements.txt
-```
-
-**Git Bash：**
 ```bash
-source /d/Miniconda/etc/profile.d/conda.sh
-conda create -n mathstory python=3.11 -y
-conda activate mathstory
-cd /d/MathStoryboard
+D:/Miniconda/envs/manim/python.exe generate.py examples/quadratic_transform.json
+```
+
+| 项 | 值 |
+|---|---|
+| 环境名 | `manim` |
+| Python | **3.12.14** |
+| Manim CE | **0.21.0** |
+| 路径 | `D:\Miniconda\envs\manim\python.exe` |
+
+Miniconda 基础环境是 Python 3.14，**太新**，Manim 依赖有兼容问题 —— 所以渲染一律走这个环境，不要用 base。
+
+<details>
+<summary>万一环境丢了，重建方式</summary>
+
+```powershell
+D:\Miniconda\Scripts\conda.exe create -n manim python=3.12 -y
+D:\Miniconda\Scripts\conda.exe activate manim
 pip install -r requirements.txt
 ```
+</details>
 
 ### 2. FFmpeg（必须）
 
@@ -152,9 +166,86 @@ python generate.py examples/free_derivative.json --resolution 1280,720 --fps 24
 # 还想更快：首次渲染加 --fast（60s → 39s）
 python generate.py examples/free_derivative.json --fast --resolution 1280,720 --fps 24
 
-# 反复调同一份分镜：--parallel 带增量缓存，重跑只要 0.2 s
-python generate.py examples/free_derivative.json --parallel
+# 反复调同一份分镜：靠增量缓存，重跑只要 0.2 s
+python generate.py examples/free_derivative.json --split
 ```
+
+### 分镜级渲染：默认路径就边渲边切，不需要 `--parallel`
+
+产品需要"每个分镜一个 mp4"（「渲好一段推一段」「单分镜失败只重跑那一段」都靠它）。
+**但不需要为此把场景拆开** —— manim 的 partial 片段本来就是渲染过程中逐个写出来的，
+只要在分镜边界把它们当场合并，就能做到"这一段渲完立刻出片"：
+
+```python
+class StoryboardScene(Scene):
+    def section(self, n):          # 分镜边界（renderer 生成时插入）
+        if n > 1:
+            self._emit(n - 1)      # 把上一段的 partial 合并成 mp4 + 打一行 @@ {json}
+        super().next_section("scene_%d" % n)
+```
+
+`StoryboardScene` 因此在渲染过程中持续输出：
+
+```
+@@ {"section": 1, "video": ".../sections/StoryboardScene_0000_scene_1.mp4", "duration": 5.0}
+@@ {"section": 2, "video": ".../sections/StoryboardScene_0001_scene_2.mp4", "duration": 7.333}
+...
+```
+
+父进程逐行读 stdout 就能**实时**把每段推给前端。整条成片由 manim 正常输出，
+不需要 `--save_sections`（那条路要等 `finish()` 才一次性切，拿不到实时时机）。
+
+同一份 `free_product_rule.json`（8 分镜，480p15，20 核 Intel Ultra 7 255HX）实测：
+
+| 路径 | 总耗时 | 首段可见 | 产物 |
+|---|---|---|---|
+| **默认（一个 Scene + 边渲边切）** | **13.7 s** | **2.3 s** | 整条 + 8 段 + 真实时长 |
+| 默认 + `--save_sections`（finish 才切） | 12.9 s | 12.3 s | 整条 + 8 段 |
+| 默认（完全不分段） | 12.9 s | — | 1 个 mp4 |
+| 拆分渲染（8 个独立场景） | 16.1 s | 1.6 s | 8 段 |
+| 旧 `--parallel`（8 分镜 × 8 进程） | 23.8 s | ~18 s | 8 段 |
+
+**只比"完全不分段"多 0.8 s，就换来 2.3 s 的首段可见时间**（vs 12.3 s），
+而且每段时长是**按真实帧数**算的（`5.0`、`7.333`、`11.599`…），比大纲估算值准。
+
+> 合并用的是 manim 自己的 `combine_files()`（PyAV remux，不重编码），
+> 所以很快；它的代价主要在 `join_all_encode_jobs()` 会等当前在途编码收尾。
+> 若以后要再压这 0.8 s，可以把合并丢到后台线程，别阻塞渲染主循环。
+
+#### 为什么"拆场景 + 多进程"全是弯路
+
+拆成 N 个独立场景 = N 次渲染器初始化 + N 次 `combine_to_movie`（每次把同名 mp4
+重写一遍）；"一个 Scene 演到底"这些只做一次，所以**拆开只会更慢**。
+
+多进程更没必要 —— 瓶颈是**内存带宽**，不是 CPU：
+
+```
+单进程内存拷贝吞吐        35.1 GB/s
+8 进程并行（每个进程）     7.2 GB/s     ← 整机约 58 GB/s 就封顶
+```
+
+manim 渲染是"逐帧生成 numpy 数组 + cairo 像素缓冲 + PIL 图像"的内存密集型负载。
+8 个进程并行时整机带宽只从 35 涨到 ~58 就封顶，每个进程只能分到 7.2 GB/s，
+于是**每个都慢 4~5 倍**，20 个核在这种负载上帮不上忙。
+
+> 旁证：8 进程并行做纯计算每个都能满速；8 进程并行写 3200 个小文件 0.35 s；
+> 8 进程并行 import manim 1.14 s。CPU、磁盘、模块导入都不是瓶颈，唯独渲染慢。
+
+历史教训（2026-09-12 一轮排查）：先试过"每分镜一个进程"，再试过"拆分场景 + 进程内连渲"，
+两版都比默认路径慢；后来才想到去翻 `scene_file_writer.py`，发现 partial 片段是渲染中
+逐个产出的。**遇到同类问题先读一遍 manim 的源码，再动手造轮子。**
+
+#### 仍然保留的开关
+
+```bash
+python generate.py examples/free_product_rule.json                  # 默认：整条 + 分镜片段（推荐）
+python generate.py examples/free_product_rule.json --split          # 每个分镜独立渲染（调试单个分镜用，较慢）
+python generate.py examples/free_product_rule.json --split --jobs 2 # 分 2 组并行渲染
+```
+
+`--split` 走 `storyboard/render_worker.py`：把分镜分成 `--jobs` 组，每组一个进程、
+组内共用渲染目录、源码合并预热，产物落在 `_parts/<name>/segments/`。
+它比默认路径慢，只在"想单独调某个分镜"或将来"单分镜渲染极重、值得并行"时才有用。
 
 ### 头条：LaTeX 批处理预热（默认开启）
 
@@ -192,25 +283,38 @@ python generate.py examples/free_derivative.json --no-prewarm   # 关掉它做�
 真正的开销在 **LaTeX 编译** 和 **Python 侧的 mobject 计算**，两者都是纯 CPU。
 （LaTeX 那部分已经用批处理预热解决掉了，见上一节。）
 
+> ⚠️ 2026-09-12 更正：mobject 计算虽然是纯 CPU，但**也不是靠堆核能加速的** ——
+> 它是内存带宽受限的（单进程 35 GB/s，8 进程并行时每个只剩 7.2 GB/s，整机 ~58 GB/s 封顶）。
+> 也就是说这个 workload 对"多核"和"GPU"都不买账，见下面「分镜级渲染」一节。
+
 ---
 
 ## 三、项目结构
 
 ```
-MathStoryboard/
-├── PROJECT_KNOWLEDGE.md   ⭐ 项目知识库（团队交付必带，含 5 节踩坑清单、决策依据）
-├── storyboard/
-│   ├── dsl.py           # ⭐ 元素库 + 动作库 + 代码构建器（DSL 写法的核心）
-│   ├── templates.py     # 9 个旧模板（确定性代码，兼容旧分镜，不再新增）
-│   ├── schema.py        # 分镜 JSON 校验，自动识别 DSL / 模板两种写法
-│   ├── renderer.py      # JSON → Manim 源码（含 LaTeX/CJK 分流、生成后 compile 自检）
-│   ├── llm.py           # ⭐ LLM 接入：prompt + OpenAI 兼容调用 + 校验失败回灌重试
-│   └── latex_env.py     # MiKTeX/TeX Live 自动探测 + PATH 注入
-├── examples/            # 分镜 JSON 样例（free_*.json 是 DSL 写法）
-├── output/              # 生成的 .py 和 mp4
-├── generate.py          # 主入口（--spec 可打印给大模型看的 DSL 规格）
-├── check_env.py         # 环境自检 + MathTex 实测渲染
-└── requirements.txt
+D:\Manimatic\
+├── MathStoryboard\        ← 本仓库（Python 渲染服务）
+│   ├── HANDOFF.md         ⭐ 交接文档（前端 → 后端，先读这份）
+│   ├── PROJECT_KNOWLEDGE.md  ⭐ 项目知识库（团队交付必带，含踩坑清单、决策依据）
+│   ├── docs/              # 设计文档：前端架构 / 后端改造清单 / 实时交付契约
+│   │                      # ⚠️ 副本已分发到 ../web/docs/，改动需两边同步
+│   ├── storyboard/
+│   │   ├── dsl.py         # ⭐ 元素库 + 动作库 + 代码构建器（DSL 写法的核心）
+│   │   ├── templates.py   # 9 个旧模板（确定性代码，兼容旧分镜，不再新增）
+│   │   ├── schema.py      # 分镜 JSON 校验，自动识别 DSL / 模板两种写法
+│   │   ├── renderer.py    # JSON → Manim 源码（sections=True 时边渲边切）
+│   │   ├── render_worker.py # 仅服务于 --split（调试单分镜），不是主路径
+│   │   ├── llm.py         # ⭐ LLM 接入：prompt + OpenAI 兼容调用 + 校验失败回灌重试
+│   │   ├── tex_batch.py   # ⭐ LaTeX 批处理预热（清缓存首渲 60s → 12.9s）
+│   │   └── latex_env.py   # MiKTeX/TeX Live 自动探测 + PATH 注入
+│   ├── examples/          # 分镜 JSON（free_*.json 是 DSL 写法；a1~e3 是 15 题测试集）
+│   ├── output/            # 自动生成的 .py / 分镜片段（_parts）/ mp4（videos）
+│   ├── eval/              # 测试题集 + 判对判错清单 + Bug 清单
+│   ├── generate.py        # 主入口（--spec 可打印给大模型看的 DSL 规格）
+│   ├── check_env.py       # 环境自检 + MathTex 实测渲染
+│   ├── run_all.bat        # 一键渲染 15 题测试集
+│   └── requirements.txt
+└── web\                   ← git repo B（Next.js 前端，GitHub 名 manimatic-web）
 ```
 
 ---
@@ -328,10 +432,34 @@ python generate.py examples/free_pythagorean.json    # 勾股定理（多边形 
 
 ## 七、还没做的部分
 
+**接前端的三块空白（按依赖顺序）**
+
+1. **HTTP 服务层**：现在只有 CLI（`generate.py`），前端没法调。需要封一层 API：
+   提交题目 → 返回任务 id → 轮询/订阅进度 → 取最终视频。
+2. **进度事件流**：渲染过程现在只往 stdout 打印，没有可订阅的事件。
+   前端要显示"正在生成第 3/5 个分镜"，得从 manim 的输出里解析进度点，
+   再转成可推送的事件（SSE 或 WebSocket）。
+   > 分镜**产物**已经不用愁了：默认路径就会产出 `sections/*.mp4` 与带真实时长的
+   > `sections/StoryboardScene.json`（见「分镜级渲染」一节），前端拿它渲染整片时间轴即可。
+3. **分阶段 LLM 输出**：`llm.generate_storyboard()` 是**一次性**返回完整分镜 JSON
+   （system prompt 明确要求"只输出 JSON，不要任何解释文字"）。
+   产品想要的「先文字回答 → 再分镜大纲 → 再 JSON」目前**没有实现**，
+   需要拆成多轮调用或改用流式输出。
+
+**其它待办**
+
 - Docker 沙箱（执行生成的代码必须隔离，方案评估文档里有配置要点）
-- 前端页面 / uni-app / 若依接入
-- 补 2 个新模板（几何证明、向量变换）
-- 接入百度「试卷切题识别」OCR（题目输入）
+- 元素库扩容：DSL 路线下**不再新增模板**，缺的题型（几何证明、向量变换、数列）
+  应该通过补 `dsl.py` 的元素/动作来覆盖
+
+**已降级 / 搁置**
+
+- ~~接入百度「试卷切题识别」OCR~~ —— **不再是核心路径**。定位收敛为
+  "**题目 → 讲解动画**"，入口以**文本题目**为主（`--problem`），
+  拍照识题只是便捷入口，可有可无，不为它排期。
+
+> 前端选型已于 2026-09-11 定为 **Web 优先（React 生态）+ Capacitor 出包**，
+> 不再走 uni-app / HBuilderX / 若依那条线。
 
 **项目背景与决策依据**：见 `PROJECT_KNOWLEDGE.md`（项目知识库）。
 **完整方案设计**：见工作区目录 `赛道三-讲解视频动画方案评估.md` 和 `赛道三-方案澄清-产品形态与链路决策.md`。

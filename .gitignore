@@ -1,4 +1,5 @@
 .vscode/
+.codebuddy/
 output/
 __pycache__/
 
