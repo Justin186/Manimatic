@@ -202,6 +202,11 @@ def save_task_storyboard(name, raw_storyboard, meta=None):
         "updated_at": time.time(),
         # 渲染版本号：每次重渲 +1。前端不用它，但排查"这份 mp4 是哪一版"时很省事。
         "render_version": int(old.get("render_version") or 0) + 1,
+        # 这次渲染用的质量目录（480p15 / 720p30 …）。**必须落盘**：
+        # 读产物那侧（rebuild_render_state）如果按"当前配置"去猜目录，
+        # 中途改过 MSB_QUALITY 就会去错误的目录找文件 —— 表现是视频集体消失
+        # 而且不报任何错，正是本项目最忌讳的静默失效。
+        "quality_dir": config.quality_dir_name(),
     }
     m.update(meta or {})
     _write_json(os.path.join(d, "meta.json"), m)
@@ -216,11 +221,516 @@ def load_task_meta(name):
     return _read_json(os.path.join(task_dir(name), "meta.json")) or {}
 
 
+# ---------------- 产物路径（相对 /media 的根）----------------
+#
+# ⚠️ 必须与 pipeline 写产物时用的是**同一套命名**：那边写、这边读，差一个字符
+#    恢复出来的就是一串 404 的视频地址，而且不会报任何错。
+#    所以实现放在这里，pipeline 的 _section_rel/_final_rel 改为转发 ——
+#    pipeline 可以 import store，反过来不行（会成环）。
+
+def section_rel(name, qdir, index):
+    """某一段 mp4 相对 output/videos 的路径（media_url 吃的就是这个）。"""
+    return f"{name}_scene/{qdir}/sections/{section_filename(index)}"
+
+
+def final_rel(name, qdir):
+    """整条成片相对 output/videos 的路径。"""
+    return f"{name}_scene/{qdir}/StoryboardScene.mp4"
+
+
+# ---------------- 恢复：会话列表 / 会话详情 ----------------
+#
+# 这一层**不新增任何写入**，只是把 _tasks/ 下已经躺着的东西读出来拼回去。
+# 渲染热路径一行不动，也就不会多出一个新的静默失效面。
+
+def _now_ms(ts):
+    """
+    秒 → 毫秒。
+
+    后端 time.time() 是秒，前端的 Date.now() 和"3 分钟前"那类相对时间全按毫秒算。
+    漏转一次，界面上就会显示"1970 年前"。
+    """
+    return int(round(float(ts) * 1000))
+
+
+def _thread_title(msgs, meta=None):
+    """
+    会话标题。**用户改过的名字优先**（存在 sessions/<t>.json 里），
+    没有才退回首条用户消息的前 20 字。
+
+    退回首句这条规则是前端新建会话时用的（Workbench.send 拿第一句当标题），
+    但那是内存态、刷新即失 —— 所以后端按同样的规则推一遍，至少两边看着一致。
+    """
+    t = str((meta or {}).get("title") or "").strip()
+    if t:
+        return t
+    for m in msgs:
+        if str(m.get("role")) != "user":
+            continue
+        t = str(m.get("content") or "").strip()
+        if t:
+            return t[:20]
+    return "新的讲解"
+
+
+def _thread_subtitle(msgs, storyboard, plan):
+    """副标题。拿不到分镜数就退化成消息条数，都没有就让前端去显示相对时间。"""
+    scenes = storyboard.get("scenes") if isinstance(storyboard, dict) else None
+    n = len(scenes) if isinstance(scenes, list) and scenes else len(plan or [])
+    if n:
+        return f"{n} 个分镜"
+    return f"{len(msgs)} 条对话" if msgs else ""
+
+
+def list_threads():
+    """
+    会话摘要列表。**置顶的排前面**，其余按最近更新倒序。
+
+    ⚠️ "算不算一条会话"**只以 messages/ 为准** —— 侧栏叫"历史会话"，语义是对话。
+
+    一开始这里取的是 messages/ 与 threads/ 的**并集**，想法是"只存在其中一个很正常"。
+    但 threads/ 里还会躺着 **CLI 直接生成分镜**留下的名字（`generate.py` 跑的调试任务，
+    从来就没有对话），列进去的结果是点开一片空白 —— 用户当场撞上了这个。
+    并集只在"messages 缺、threads 有"时是错的，而反过来（刚问一句还没出分镜）
+    并集也是多余的：那种情况 messages 本来就有。
+    所以只用 messages/ 定成员，threads/ 退居"补充分镜数"的角色。
+
+    返回的 id 取自**文件名**（它已经是 safe_id 清洗过的形态）。这是安全的：
+    safe_id 幂等，前端把这个 id 原样发回来时清洗结果不变，仍指向同一个文件。
+    """
+    root = tasks_root()
+    d = os.path.join(root, "messages")
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []                      # 还没有任何对话（目录都还没建）
+    ids = {f[:-5] for f in names if f.endswith(".json")}
+
+    out = []
+    for tid in ids:
+        msgs = load_thread_messages(tid)
+        raw, plan = load_thread_storyboard(tid)
+        meta = load_session_meta(tid)
+        stamps = []
+        for p in (thread_messages_file(tid), thread_file(tid)):
+            try:
+                stamps.append(os.path.getmtime(p))
+            except OSError:
+                pass
+        updated = max(stamps) if stamps else time.time()
+        out.append({
+            "id": tid,
+            "title": _thread_title(msgs, meta),
+            "subtitle": _thread_subtitle(msgs, raw, plan),
+            "updatedAt": _now_ms(updated),
+            "pinned": bool(meta.get("pinned")),
+            "shared": bool(str(meta.get("share") or "").strip()),
+        })
+    # 排序在服务端定：置顶的永远在最前，其余按最近更新。
+    # 让前端自己排的话，两处规则一旦不一致，界面顺序就和接口顺序对不上。
+    out.sort(key=lambda t: (not t["pinned"], -t["updatedAt"]))
+    return out
+
+
+def rebuild_render_state(thread_id, message_id, plan=None):
+    """
+    从磁盘把一条消息的渲染状态拼回来。没渲染过就返回 None（前端表现为普通对话）。
+
+    为什么是"读盘推导"而不是"渲染时另写一份状态"：后者要动渲染热路径，
+    而热路径上多一次写入就多一个静默失效的可能（本项目最忌讳的东西）。
+    产物本身已经把事实记全了：
+        sections/index.json   每段的**真实时长**（manim 按帧数算的，不是大纲估算值）
+        sections/*.mp4        哪几段真的交付了
+        StoryboardScene.mp4   成片在不在
+    拼一份"当前状态"是纯函数；读不出来的部分就老实缺着。
+
+    ⚠️ 一次 listdir 建集合，**绝不逐段 stat**，也**不跑 ffprobe** ——
+       ffprobe 是进程级开销，一个会话就能把接口拖到秒级。
+       时长只认 index.json，它缺失时退化为大纲里的设计时长。
+
+    ⚠️ `stop` 的语义要和渲染的真实形态对齐：后端是「一个 Scene 演到底」，
+       某一段崩了之后**后面的分镜根本没执行过**。所以第一个缺口的段是 error，
+       其后一律 queued —— 不是"全都失败了"。
+    """
+    if not thread_id or not message_id:
+        return None
+    name = task_name(thread_id, message_id)
+    if not os.path.isdir(task_dir(name)):
+        return None                    # 这个 task 从没建过 = 这条消息没渲染过
+
+    snap = load_task_storyboard(name)
+    scenes = snap.get("scenes") if isinstance(snap, dict) else None
+    n = len(scenes) if isinstance(scenes, list) and scenes else len(plan or [])
+    if not n:
+        return None
+
+    # 质量目录**优先读渲染当时落盘的那个**：中途改过 MSB_QUALITY 的话，
+    # 按当前配置去猜会跑到别的目录找文件 —— 视频集体消失，而且不报任何错。
+    meta = load_task_meta(name)
+    qdir = str(meta.get("quality_dir") or "").strip() or config.quality_dir_name()
+    sec = sections_dir(name, qdir)
+
+    durations = {}
+    for row in (_read_json(os.path.join(sec, "index.json")) or []):
+        if not isinstance(row, dict):
+            continue
+        try:
+            durations[int(row.get("index"))] = float(row.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            continue
+
+    present = set()
+    try:
+        present = {f for f in os.listdir(sec) if f.endswith(".mp4")}
+    except OSError:
+        present = set()
+
+    missing = [i for i in range(n) if section_filename(i) not in present]
+    stop = missing[0] if missing else n
+    have_final = os.path.exists(os.path.join(video_dir(name, qdir), "StoryboardScene.mp4"))
+
+    out = []
+    for i in range(n):
+        row = plan[i] if (isinstance(plan, list) and i < len(plan)
+                          and isinstance(plan[i], dict)) else {}
+        dur = durations.get(i)
+        if dur is None:
+            dur = row.get("durationSec")
+        status = "done" if i < stop else ("error" if i == stop else "queued")
+        item = {
+            "index": i,
+            "title": str(row.get("title") or f"分镜 {i + 1}"),
+            "status": status,
+            "durationSec": round(float(dur or 0.0), 3),
+        }
+        if status == "done":
+            item["url"] = media_url(section_rel(name, qdir, i))
+        out.append(item)
+
+    state = {
+        "status": "done" if (have_final and not missing) else "error",
+        "step": stop,                  # 与 SSE 的 tool_progress 同义：已交付段数
+        "total": n,
+        "scenes": out,
+    }
+    if have_final:
+        state["finalUrl"] = media_url(final_rel(name, qdir))
+    return state
+
+
+def _task_index(thread_id):
+    """
+    这个会话下所有"渲染过产物"的记录：[(message_id, created_at)]，按时间升序。
+
+    message_id 取自 `_tasks/<thread>__<message>/meta.json` —— render.py 在 confirm /
+    retry 时写进去的（那时它手上正好有前端给的 message_id）。
+    这正是给"改造之前的旧消息"找回 id 的来源。
+    """
+    out = []
+    root = tasks_root()
+    prefix = safe_id(thread_id, "t") + "__"
+    if not os.path.isdir(root):
+        return out
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        return out
+    for d in entries:
+        full = os.path.join(root, d)
+        if not d.startswith(prefix) or not os.path.isdir(full):
+            continue
+        meta = load_task_meta(d)
+        mid = str(meta.get("message_id") or "").strip() or d[len(prefix):]
+        try:
+            at = float(meta.get("created_at") or 0.0)
+        except (TypeError, ValueError):
+            at = 0.0
+        if not at:
+            try:
+                at = os.path.getmtime(full)
+            except OSError:
+                at = 0.0
+        out.append((mid, at))
+    out.sort(key=lambda x: x[1])
+    return out
+
+
+def load_thread_detail(thread_id):
+    """
+    一个会话的完整可恢复状态（消息数组 + 每条助手消息的渲染状态）。
+
+    消息 id 是这里最要紧的一件事 —— 它是前端 confirm 时定位产物的唯一钥匙：
+      - **新记录**：/api/chat 已经把前端生成的 id 落盘了，直接用。
+      - **旧记录**（这次改造之前写的）：messages 文件里没有 id，但 **task 目录名里有**
+        （`<thread>__<message>`，confirm 时写进去的）。所以按区间认领一个：
+        渲染必然发生在这轮回答之后、用户下一次发言之前，task 的 created_at 落进这个
+        区间的就是它。**这是有据可依的区间匹配，不是时间就近猜** —— 猜错会把 A 问的
+        视频挂到 B 问底下，那比"没有视频"更糟。
+      - **认领不到**（比如产物已被清理）：补一个由位置推导的稳定 id（ma_hist_3），
+        只为让前端有稳定的 key 可渲染；那些消息恢复后只有文字、没有视频 ——
+        这是诚实的降级，比"假装有个能点开的视频"好。
+
+    另一处诚实的降级：逐轮大纲是这次才落盘的。旧记录取不到自己那一轮的大纲，
+    于是**只给最后一条助手消息**挂上"会话当前这一版"（来自
+    _tasks/threads/<t>.json）—— 这样"接着点确认去渲染"这条路还走得通，
+    又不会把同一份大纲复制到每条历史消息上。
+    """
+    msgs = load_thread_messages(thread_id)
+    _, cur_plan = load_thread_storyboard(thread_id)
+
+    # 消息的原始时间戳（秒）。给旧记录划"哪些 task 属于它"的区间要用。
+    stamps = []
+    for m in msgs:
+        try:
+            stamps.append(float(m.get("at") or 0.0) if isinstance(m, dict) else 0.0)
+        except (TypeError, ValueError):
+            stamps.append(0.0)
+
+    pool = _task_index(thread_id)
+    claimed = set()
+
+    last_asst = -1
+    for i, m in enumerate(msgs):
+        if isinstance(m, dict) and str(m.get("role")) == "assistant":
+            last_asst = i
+
+    out = []
+    for i, m in enumerate(msgs):
+        if not isinstance(m, dict):
+            continue
+        role = "assistant" if str(m.get("role")) == "assistant" else "user"
+        mid = str(m.get("message_id") or "").strip()
+
+        # 旧记录：从 task 目录里按区间认领（见上面那段说明）。
+        if not mid and role == "assistant" and stamps[i]:
+            upper = float("inf")
+            if i + 1 < len(stamps) and stamps[i + 1] > stamps[i]:
+                upper = stamps[i + 1]
+            for k, (tmid, tat) in enumerate(pool):
+                if k not in claimed and stamps[i] <= tat < upper:
+                    mid = tmid
+                    claimed.add(k)
+                    break
+        # 认领不到就补一个稳定 id：至少让前端有 key 可渲染
+        if not mid:
+            mid = f"{'ma' if role == 'assistant' else 'mu'}_hist_{i}"
+
+        item = {
+            "id": mid,
+            "role": role,
+            "text": str(m.get("content") or ""),
+            "createdAt": _now_ms(m.get("at") or time.time()),
+        }
+        if role != "assistant":
+            out.append(item)
+            continue
+
+        if isinstance(m.get("plan"), list) and m["plan"]:
+            item["plan"] = m["plan"]
+        elif i == last_asst and isinstance(cur_plan, list) and cur_plan:
+            item["plan"] = cur_plan
+
+        intent = str(m.get("intent") or "").strip()
+        if intent not in ("propose", "none"):
+            intent = "propose" if item.get("plan") else "none"
+        item["intent"] = intent
+
+        # 只传这条消息**自己那一轮**的大纲：拿 cur_plan 兜底会把"会话当前这一版"
+        # 的分镜标题套到别的产物上（段数由快照决定，标题却会串轮）。
+        render = rebuild_render_state(thread_id, mid, item.get("plan"))
+        if render:
+            item["render"] = render
+            # 有产物 = 用户当时确实点过"确认"（渲染只能从 confirm 发起）
+            item["planState"] = "confirmed"
+        elif intent == "none":
+            item["planState"] = "none"
+        else:
+            # 有大纲但没渲染过 → 待确认。
+            # （"放弃大纲"是前端的本地状态、不上报，恢复后一律回到 pending ——
+            #   这是唯一不骗人的取值。）
+            item["planState"] = "pending"
+        out.append(item)
+    return out
+
+
+def build_share_payload(thread_id):
+    """
+    分享页要的东西：标题 + 成片 + 分段清单。
+
+    取"这个会话里**最后一条出过片**的助手消息" —— 分享的是成片本身，不是整段对话
+    （对话里可能有用户的问题原文和追问，分享页只放视频与标题）。
+
+    没有成片时也返回一个合法结构（`final=None`），让分享页能显示"这条还没有视频"，
+    而不是把 404 的处理推给前端。
+    """
+    meta = load_session_meta(thread_id)
+    msgs = load_thread_messages(thread_id)
+    title = _thread_title(msgs, meta)
+
+    picked = None
+    for m in load_thread_detail(thread_id):
+        r = m.get("render")
+        if m.get("role") == "assistant" and isinstance(r, dict) and r.get("finalUrl"):
+            picked = r
+    if not picked:
+        return {"thread_id": thread_id, "title": title, "subtitle": "",
+                "segments": [], "final": None}
+
+    segments = [
+        {"index": int(s.get("index") or 0),
+         "title": str(s.get("title") or f"分镜 {int(s.get('index') or 0) + 1}"),
+         "url": s.get("url") or "",
+         "durationSec": float(s.get("durationSec") or 0.0)}
+        for s in (picked.get("scenes") or []) if isinstance(s, dict)
+    ]
+    return {
+        "thread_id": thread_id,
+        "title": title,
+        "subtitle": f"{picked.get('total') or len(segments)} 个分镜",
+        "segments": segments,
+        "final": {"url": picked["finalUrl"],
+                  "durationSec": round(sum(s["durationSec"] for s in segments), 3)},
+    }
+
+
+# ---------------- 会话元数据：用户改出来的东西 ----------------
+#
+# 标题（重命名）、置顶、分享 token 这三样，都**不是渲染产物**，也**不能**混进
+# messages / threads 那两个文件 —— 它们各有各的写入方（chat 追加消息、render 覆盖
+# 分镜），而 `_write_json` 是**覆盖写**，往里塞字段会被下一次写入整体带掉。
+# 所以单独一个文件，一条会话一个。
+
+def thread_exists(thread_id):
+    """
+    这个会话有没有真实数据（对话或分镜）。
+
+    用来拦住"给不存在的会话写元数据" —— 否则会留下一个只有 sessions/<t>.json 的
+    "幽灵会话"：列表里不显示它（列表以 messages/ 为准），但它永远赖在磁盘上。
+    """
+    return (os.path.isfile(thread_messages_file(thread_id))
+            or os.path.isfile(thread_file(thread_id)))
+
+
+def sessions_dir():
+    return os.path.join(tasks_root(), "sessions")
+
+
+def session_file(thread_id):
+    return os.path.join(sessions_dir(), safe_id(thread_id, "t") + ".json")
+
+
+def load_session_meta(thread_id):
+    """读用户改出来的会话属性。没改过就是空 dict（不是错误）。"""
+    data = _read_json(session_file(thread_id)) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_session_meta(thread_id, patch):
+    """
+    合并写，**不是**覆盖写。
+
+    ⚠️ 必须是合并：置顶和分享是两个独立动作，覆盖写会让"先分享、后置顶"
+    把分享链接悄悄抹掉 —— 又一种静默失效。
+    `patch` 里值为 None 表示"删掉这个键"（比如取消分享）。
+    """
+    cur = load_session_meta(thread_id)
+    for k, v in (patch or {}).items():
+        if v is None:
+            cur.pop(k, None)
+        else:
+            cur[k] = v
+    cur["updated_at"] = time.time()
+    _write_json(session_file(thread_id), cur)
+    return cur
+
+
+def find_share_slug(slug):
+    """
+    按分享 token 找回会话 id（分享页用，公开访问）。
+
+    遍历 sessions/ 逐个比对，而不是另建一张 slug → thread 的反查表：
+    多一张表就多一个"删会话时忘了删表"的漏，而这里量级很小（内网、少量用户），
+    根本不需要索引。
+    """
+    want = str(slug or "").strip()
+    if not want:
+        return ""
+    try:
+        names = os.listdir(sessions_dir())
+    except OSError:
+        return ""
+    for f in names:
+        if not f.endswith(".json"):
+            continue
+        tid = f[:-5]
+        if str(load_session_meta(tid).get("share") or "").strip() == want:
+            return tid
+    return ""
+
+
+def delete_thread(thread_id):
+    """
+    删掉一条会话：对话历史、分镜快照、用户元数据，以及它名下**全部渲染产物**。
+
+    ⚠️ 只认"以这个 thread_id 命名"的东西，且 task 目录用 `safe_id(thread) + "__"`
+       **整段前缀**识别，绝不做模糊匹配 —— 否则 `t_4rf2aue` 会误伤 `t_4rf2aue2`
+       的产物。那个 `__` 分隔符正是为此存在的（见 task_name）。
+    """
+    sid = safe_id(thread_id, "t")
+    prefix = sid + "__"
+    root = tasks_root()
+    removed = []
+
+    # 1) 会话级三个文件
+    for p in (thread_messages_file(thread_id), thread_file(thread_id),
+              session_file(thread_id)):
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+                removed.append(os.path.basename(p))
+            except OSError:
+                pass
+
+    # 2) 该会话名下的每个 task：产物 + 增量缓存 + 成片 + 生成的 Manim 源码
+    try:
+        entries = os.listdir(root)
+    except OSError:
+        entries = []
+    for name in entries:
+        if not name.startswith(prefix) or not os.path.isdir(os.path.join(root, name)):
+            continue
+        targets = [
+            task_dir(name),                                  # 分镜快照 + meta
+            parts_dir(name),                                 # 增量缓存（_parts）
+            os.path.join(config.OUTPUT_DIR, f"{name}_scene.py"),
+            os.path.join(config.OUTPUT_DIR, "videos", f"{name}_scene"),
+        ]
+        for p in targets:
+            if os.path.isdir(p):
+                shutil.rmtree(p, ignore_errors=True)
+                removed.append(os.path.basename(p))
+            elif os.path.isfile(p):
+                try:
+                    os.remove(p)
+                    removed.append(os.path.basename(p))
+                except OSError:
+                    pass
+    return removed
+
+
 # ---------------- 清理 ----------------
 
 def cleanup_stale(days=None):
     """
-    删掉超过 N 天没动过的 task 目录与它的产物/缓存。
+    删掉超过 N 天没动过的**渲染产物**（task 快照、增量缓存、成片、生成的 Manim 源码）。
+
+    ⚠️ **绝不碰会话数据**：`messages/`（对话）、`threads/`（当前这一版分镜）、
+       `sessions/`（标题 / 置顶 / 分享）一律留着。
+       这条分界是后来才划清的 —— 以前它们跟着产物一起按 TTL 删，于是"清理磁盘"
+       会顺带把会话历史清掉，而用户只会看到"过一阵我的对话就没了"，
+       根本不会联想到是自己配的那个天数干的。
+       现在的规矩是：**文字永久保留，只有视频这类大文件可以按需清**。
+       被清掉的消息恢复出来只是没有视频，大纲和文字都还在，重新点确认还能再渲。
 
     ⚠️ 只删**我们自己建过的东西**（以 output/_tasks/ 下的目录名为准），
        绝不去扫 output/videos 反推 —— output/ 里还有 examples 的历史产物和
@@ -228,38 +738,39 @@ def cleanup_stale(days=None):
     """
     days = config.TASK_TTL_DAYS if days is None else days
     if not days or days <= 0:
-        return {"removed": [], "skipped": "cleanup disabled"}
+        return {"removed": [], "skipped": "cleanup disabled（会话与产物都保留）"}
+
     cutoff = time.time() - days * 86400
     root = tasks_root()
-    removed = []
     if not os.path.isdir(root):
-        return {"removed": []}
+        return {"removed": [], "days": days}
+
+    # 这三个是会话数据目录，永远不参与清理
+    keep_dirs = {"threads", "messages", "sessions"}
+
+    removed = []
     for entry in os.listdir(root):
         full = os.path.join(root, entry)
-        if entry == "threads" or not os.path.isdir(full):
+        if entry in keep_dirs or not os.path.isdir(full):
             continue
         try:
             if os.path.getmtime(full) >= cutoff:
                 continue
         except OSError:
             continue
-        targets = [full, parts_dir(entry),
-                   os.path.join(config.OUTPUT_DIR, "videos", f"{entry}_scene")]
+        targets = [
+            full,                                                          # 分镜快照 + meta
+            parts_dir(entry),                                              # 增量缓存
+            os.path.join(config.OUTPUT_DIR, f"{entry}_scene.py"),          # 生成的 Manim 源码
+            os.path.join(config.OUTPUT_DIR, "videos", f"{entry}_scene"),   # 成片与分段
+        ]
         for t in targets:
             if os.path.isdir(t):
                 shutil.rmtree(t, ignore_errors=True)
+            elif os.path.isfile(t):
+                try:
+                    os.remove(t)
+                except OSError:
+                    pass
         removed.append(entry)
-    # 会话文件单独按时间戳清（分镜 + 对话历史两个目录同一套规矩）
-    for sub in ("threads", "messages"):
-        tdir = os.path.join(root, sub)
-        if not os.path.isdir(tdir):
-            continue
-        for f in os.listdir(tdir):
-            fp = os.path.join(tdir, f)
-            try:
-                if os.path.getmtime(fp) < cutoff:
-                    os.remove(fp)
-                    removed.append(f"{sub}/{f}")
-            except OSError:
-                pass
     return {"removed": removed, "days": days}

@@ -30,10 +30,18 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     thread_id: str = "demo"
     message: str = ""
-    # 前端会把这三样一起发过来（web/src/lib/api.ts 的 ChatRequest），
+    # 前端会把这几样一起发过来（web/src/lib/api.ts 的 ChatRequest），
     # 它们只影响 prompt 措辞，不参与校验，所以这里用宽松的 dict 收。
     profile: dict | None = None
     overrides: dict | None = None
+    # 前端自己生成的消息 id（`uid("ma")` / `uid("mu")`，见 web/src/lib/utils.ts）。
+    # **可选**：不传时后端自己生成一个，旧客户端的行为一个字都不用改。
+    #
+    # 为什么非存不可：前端 confirm 时发的 message_id 就是它自己那个 assistant id，
+    # 而 store.task_name(thread_id, message_id) 是定位渲染产物的唯一钥匙。
+    # 不落盘的话，刷新后谁也不知道该拿哪个 id 去取分镜 —— 后端存着全套产物也读不回来。
+    message_id: str = ""
+    user_message_id: str = ""
 
 
 _ROLE_LABEL = {"student": "学生", "parent": "家长", "teacher": "教师"}
@@ -73,7 +81,9 @@ async def chat(req: ChatRequest):
     if not topic:
         return sse_response(error_stream("题目是空的，先在输入框里写一道题", scope="task"))
 
-    mid = "m_" + uuid.uuid4().hex[:12]
+    # 前端带了 id 就用它的 —— 两边共用同一个 id 是整条恢复链路的前提：
+    # confirm 发的 message_id 必须和这里落盘的那个一模一样，否则算不出 task_name。
+    mid = (req.message_id or "").strip() or ("m_" + uuid.uuid4().hex[:12])
     cancel = pipeline.new_cancel()
     state = {"streamed": 0, "thinking": 0}
 
@@ -97,7 +107,12 @@ async def chat(req: ChatRequest):
         past = store.load_thread_messages(req.thread_id)
         # 把本轮用户消息**先记下来**再调用：模型要看到"最后一条是本次请求"。
         # 顺序反过来的话，历史里永远缺当前这句。
-        store.append_thread_message(req.thread_id, "user", topic)
+        #
+        # meta 里带上前端给的那个 id：恢复会话时要把这条 user 气泡也放回原位。
+        # 没有它就只能靠"role + 顺序"猜，连续两条 user 消息会错位。
+        store.append_thread_message(
+            req.thread_id, "user", topic,
+            meta={"message_id": req.user_message_id} if req.user_message_id else None)
 
         def on_delta(text):
             state["streamed"] += len(text)
@@ -142,7 +157,15 @@ async def chat(req: ChatRequest):
         # 助手这轮的**自然语言结论**进历史（brief），**不是**分镜 JSON：
         # 分镜几千 token，塞进去会把上下文预算吃光，也会让前缀缓存次次落空。
         # brief 里已经写清了"这一轮讲了什么"，足够支撑下一轮的指代消解。
-        store.append_thread_message(req.thread_id, "assistant", sb.get("brief") or "")
+        # meta 里存 id + plan + intent，三样都是恢复链路要用的：
+        #   id     —— 刷新后拿它对上 confirm 时的 task_name（取回分镜与视频）
+        #   plan   —— _tasks/threads/<t>.json 只存"当前这一版"，恢复不了每一轮各自的大纲
+        #   intent —— 决定恢复后这张卡片是"待确认的大纲"还是"纯文字回答"
+        store.append_thread_message(
+            req.thread_id, "assistant", sb.get("brief") or "",
+            meta={"message_id": mid,
+                  "plan": sb.get("outline") or [],
+                  "intent": sb.get("intent") or "propose"})
 
         # 落盘：confirm 只会发 thread_id + message_id，分镜本体必须由后端记住。
         store.save_thread_storyboard(req.thread_id, raw, plan=sb.get("outline") or [])

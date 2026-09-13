@@ -52,6 +52,21 @@ FAST = _env_bool("MSB_FAST", False)
 RESOLUTION = _env_str("MSB_RESOLUTION", "")
 FPS = _env_int("MSB_FPS", 0)
 
+# manim 的产物目录名（{高度}p{帧率}）。**实现只有这一处**：
+# pipeline 写产物要用它，store 读产物（恢复渲染状态）也要用它，而 store 不能反向
+# import pipeline（pipeline 已经 import store，会成环）。各写一份的话迟早漂移 ——
+# 一旦不一致，恢复出来的视频地址会整片 404，且不会报任何错。
+QUALITY_DIRS = {"l": "480p15", "m": "720p30", "h": "1080p60",
+                "p": "1440p60", "k": "2160p60"}
+
+
+def quality_dir_name():
+    """manim 的产物目录名：{高度}p{帧率}。与 generate.py::quality_tag 保持一致。"""
+    if RESOLUTION:
+        h = RESOLUTION.split(",")[1].strip()
+        return f"{h}p{FPS}" if FPS else f"{h}p30"
+    return QUALITY_DIRS.get(QUALITY, "480p15")
+
 # 单条 8 分镜任务峰值会吃满 min(8, CPU核数) 个核，多用户同时来会直接打爆机器。
 # MVP 用信号量足够，不必上 Celery（见 docs/前端接入-后端改造清单.md §6）。
 MAX_CONCURRENT_RENDERS = max(1, _env_int("MSB_MAX_CONCURRENT_RENDERS", 2))
@@ -59,9 +74,14 @@ MAX_CONCURRENT_RENDERS = max(1, _env_int("MSB_MAX_CONCURRENT_RENDERS", 2))
 # 每日渲染配额，0 = 不限。真上生产建议换 Redis 计数（多进程/多实例下内存计数会各算各的）。
 DAILY_RENDER_QUOTA = max(0, _env_int("MSB_DAILY_RENDER_QUOTA", 0))
 
-# task 目录 / _parts 缓存的保留天数，0 = 关闭清理。
-# 清理只删"我们自己建过的 task 目录"，绝不去动 output/ 下的历史产物。
-TASK_TTL_DAYS = max(0, _env_int("MSB_TASK_TTL_DAYS", 14))
+# 渲染产物（task 快照 / 增量缓存 / 成片）的保留天数。**默认 0 = 不自动清理。**
+#
+# ⚠️ 这里只管**产物**：会话数据（对话记录、分镜快照、标题/置顶/分享）**永不自动清理**。
+#    以前这两样混在一起按 TTL 删，后果是"清理磁盘"会顺带把会话历史也清掉 ——
+#    用户只会看到"过一阵我的对话就没了"，而且完全不知道是自己配的那个天数干的。
+#    现在分清了：文字永久保留，只有视频这类大文件可以按需清
+#    （被清掉的消息恢复出来只是没有视频，大纲和文字都还在，重新点确认还能再渲）。
+TASK_TTL_DAYS = max(0, _env_int("MSB_TASK_TTL_DAYS", 0))
 
 # 单条渲染的超时（秒）。前端/网关的超时要调得比它更大（≥120s）。
 RENDER_TIMEOUT = max(30, _env_int("MSB_RENDER_TIMEOUT", 900))

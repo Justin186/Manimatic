@@ -32,6 +32,7 @@ from .routes import chat as chat_routes
 from .routes import render as render_routes
 from .routes import settings as settings_routes
 from .routes import storyboard as storyboard_routes
+from .routes import threads as threads_routes
 
 
 @contextlib.asynccontextmanager
@@ -69,6 +70,7 @@ app.include_router(chat_routes.router, prefix="/api", tags=["chat"])
 app.include_router(render_routes.router, prefix="/api", tags=["render"])
 app.include_router(storyboard_routes.router, prefix="/api", tags=["storyboard"])
 app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
+app.include_router(threads_routes.router, prefix="/api", tags=["threads"])
 
 
 @app.get("/", include_in_schema=False)
@@ -150,6 +152,13 @@ def _banner():
     except Exception as e:                                    # noqa: BLE001
         lines.append(f" LLM     : 配置有误 → {e}")
     lines.append(f" 产物目录 : {config.OUTPUT_DIR}")
+    # 「数据会不会被清」是最容易被怀疑且最难查的一类问题，所以把结论直接打出来。
+    # 默认是**永久保留**：会话记录与渲染产物都不自动清，只有用户手动删会话才会动磁盘。
+    lines.append(
+        f" 保留策略 : {config.TASK_TTL_DAYS} 天后清理渲染产物（会话记录永久保留）"
+        if config.TASK_TTL_DAYS
+        else " 保留策略 : 永久保留（未开启任何自动清理）"
+    )
     lines.append(f" 媒体前缀 : {config.PUBLIC_BASE_URL}/media/")
     lines.append(f" 并发上限 : {config.MAX_CONCURRENT_RENDERS} 条同时渲染")
     lines.append("=" * 68)

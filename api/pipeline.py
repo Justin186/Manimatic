@@ -53,9 +53,6 @@ from . import config, events, store
 HERE = config.ROOT
 OUTPUT = config.OUTPUT_DIR
 
-QUALITY_DIRS = {"l": "480p15", "m": "720p30", "h": "1080p60",
-                "p": "1440p60", "k": "2160p60"}
-
 _SENTINEL = object()
 
 
@@ -117,11 +114,11 @@ def new_cancel():
 # ==============================================================================
 
 def quality_dir_name():
-    """manim 的产物目录名：{高度}p{帧率}。与 generate.py::quality_tag 保持一致。"""
-    if config.RESOLUTION:
-        h = config.RESOLUTION.split(",")[1].strip()
-        return f"{h}p{config.FPS}" if config.FPS else f"{h}p30"
-    return QUALITY_DIRS.get(config.QUALITY, "480p15")
+    """
+    manim 的产物目录名。实现已移到 config（见那里的注释：store 读产物也要用，
+    而 store 不能反向 import pipeline）。这里只留一个转发，免得改一堆调用点。
+    """
+    return config.quality_dir_name()
 
 
 def _quality_args():
@@ -163,11 +160,13 @@ def _probe_duration(mp4):
 
 
 def _section_rel(name, qdir, index):
-    return f"{name}_scene/{qdir}/sections/{store.section_filename(index)}"
+    """唯一实现在 store（读产物那一侧也要用，而 store 不能反向 import 本模块）。"""
+    return store.section_rel(name, qdir, index)
 
 
 def _final_rel(name, qdir):
-    return f"{name}_scene/{qdir}/StoryboardScene.mp4"
+    """同上：写产物与读产物共用 store 里那一份命名。"""
+    return store.final_rel(name, qdir)
 
 
 def _tail_error(tail):
