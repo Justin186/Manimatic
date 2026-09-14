@@ -160,6 +160,49 @@ def _has_cjk(s):
     return bool(_CJK_RE.search(str(s)))
 
 
+_NUMBER_UNIT_BUFF = 0.14
+
+
+def _number(value, num_decimal_places=2, unit="", font_size=32, color=ACCENT):
+    """
+    动态数字标签（可带单位）。
+
+    单位是**模型自由写的字符串**，而 Manim 的 `DecimalNumber(unit=...)` 内部用
+    MathTex 渲染它 —— 中文必然
+    `LaTeX Error: Unicode character 块 (U+5757) not set up for use with LaTeX.`，
+    整个分镜直接渲不出来（2026-09-13 实测：分镜 6 的 `"unit": " 块"`）。
+    所以含中文的单位改用 Text 拼在数字右边；数字本身仍走 LaTeX（阿拉伯数字没问题）。
+    """
+    if unit and _has_cjk(unit):
+        num = DecimalNumber(value, num_decimal_places=num_decimal_places,
+                            font_size=font_size, color=color)
+        lab = Text(unit.strip(), font=CN_FONT, font_size=font_size, color=color)
+        grp = VGroup(num, lab)
+        grp.arrange(RIGHT, buff=_NUMBER_UNIT_BUFF, center=False)
+        return grp
+    # 纯 LaTeX 单位（m^2 那种上标写法）交给 DecimalNumber 自己排，效果最好
+    return DecimalNumber(value, num_decimal_places=num_decimal_places,
+                         unit=unit or None, font_size=font_size, color=color)
+
+
+def _set_number(m, value):
+    """
+    刷新数字。
+
+    为什么生成的代码不直接写 `m.set_value(v)`：带中文单位的数字外面包了一层
+    VGroup（VGroup 没有 set_value）。统一走这里，DSL 就不必分两种形态 ——
+    多一种形态就多一处分支，漏一个就是又一条静默失效。
+
+    ⚠️ `arrange(center=False)` 不能省：arrange 默认 `center=True`，内部执行的是
+    `self.center()`（即 move_to(ORIGIN)）—— 每帧都会把整块挪回屏幕中心。
+    """
+    if isinstance(m, VGroup):
+        m[0].set_value(value)
+        m.arrange(RIGHT, buff=_NUMBER_UNIT_BUFF, center=False)
+    else:
+        m.set_value(value)
+
+
 def formula(s, **kw):
     """
     公式渲染三级分流：
@@ -168,13 +211,14 @@ def formula(s, **kw):
       3. 含中文         → Tex + ctex 模板（xelatex），公式里可直接嵌中文
     """
     if not USE_LATEX:
-        return Text(s, font=CN_FONT, **kw)
+        # 降级也不能把 LaTeX 源码糊在屏幕上：先清理成人能读的记号
+        return Text(_plain_tex(s), font=CN_FONT, **kw)
     if not _has_cjk(s):
         return MathTex(s, **kw)
     try:
         return Tex(f"${s}$", tex_template=TexTemplateLibrary.ctex, **kw)
     except Exception:
-        return Text(s, font=CN_FONT, **kw)
+        return Text(_plain_tex(s), font=CN_FONT, **kw)
 
 
 def _rich_line(s, font_size, **kw):
@@ -229,6 +273,82 @@ def _legend(items, font_size=20, buff=0.16, color=WHITE):
         rows.add(VGroup(seg, lab_m).arrange(RIGHT, buff=0.12))
     rows.arrange(DOWN, aligned_edge=LEFT, buff=buff)
     return rows
+
+
+# 没有 LaTeX 时把命令换成能看懂的符号（键是 LaTeX 命令，值是 Unicode）
+_TEX_SYMBOLS = [
+    (r"\\times", "×"), (r"\\cdot", "·"), (r"\\div", "÷"), (r"\\pm", "±"), (r"\\mp", "∓"),
+    (r"\\leq", "≤"), (r"\\le", "≤"), (r"\\geq", "≥"), (r"\\ge", "≥"),
+    (r"\\neq", "≠"), (r"\\ne", "≠"), (r"\\approx", "≈"), (r"\\equiv", "≡"),
+    (r"\\infty", "∞"), (r"\\to", "→"), (r"\\rightarrow", "→"), (r"\\Rightarrow", "⇒"),
+    (r"\\in", "∈"), (r"\\notin", "∉"), (r"\\subset", "⊂"), (r"\\cup", "∪"),
+    (r"\\cap", "∩"), (r"\\forall", "∀"), (r"\\exists", "∃"), (r"\\angle", "∠"),
+    (r"\\perp", "⊥"), (r"\\parallel", "∥"), (r"\\sim", "∼"),
+    (r"\\sum", "Σ"), (r"\\prod", "Π"), (r"\\int", "∫"), (r"\\partial", "∂"),
+    (r"\\nabla", "∇"), (r"\\prime", "′"), (r"\\dots", "…"), (r"\\ldots", "…"), (r"\\cdots", "⋯"),
+    (r"\\alpha", "α"), (r"\\beta", "β"), (r"\\gamma", "γ"), (r"\\delta", "δ"),
+    (r"\\varepsilon", "ε"), (r"\\epsilon", "ε"), (r"\\theta", "θ"), (r"\\lambda", "λ"),
+    (r"\\mu", "μ"), (r"\\pi", "π"), (r"\\rho", "ρ"), (r"\\sigma", "σ"),
+    (r"\\tau", "τ"), (r"\\varphi", "φ"), (r"\\phi", "φ"), (r"\\omega", "ω"),
+    (r"\\Delta", "Δ"), (r"\\Omega", "Ω"), (r"\\quad", "  "), (r"\\qquad", "   "),
+]
+
+
+def _plain_tex(s):
+    """
+    没有 LaTeX 时的兜底清理：把命令换成能看懂的符号。
+
+    不做这一步，屏幕上会原样糊着 `0\\times1+1\\times0=0`（2026-09-13 实测截图）——
+    "公式退化"可以接受，"把 LaTeX 源码当正文显示"不行。这里是降级路径，
+    宁可排得糙，也不能让用户看到看不懂的东西。
+    """
+    t = str(s)
+    for k, v in _TEX_SYMBOLS:            # 长的先替，避免 \\le 吃掉 \\leq
+        t = t.replace(k, v)
+    t = _re.sub(r"\\\\frac\\{([^{}]*)\\}\\{([^{}]*)\\}", r"(\\1)/(\\2)", t)
+    t = _re.sub(r"\\\\sqrt\\{([^{}]*)\\}", r"√(\\1)", t)
+    t = _re.sub(r"\\\\text\\{([^{}]*)\\}", r"\\1", t)
+    # \\mathbb{R} / \\mathrm{d}x 这类"只换字体"的包裹：直接把内容取出来
+    t = _re.sub(r"\\\\(?:mathbb|mathrm|mathbf|mathcal|mathit)\\{([^{}]*)\\}", r"\\1", t)
+    t = _re.sub(r"\\^\\{([^{}]*)\\}", r"^\\1", t)
+    t = _re.sub(r"_\\{([^{}]*)\\}", r"_\\1", t)
+    for dead in ("\\\\left", "\\\\right", "\\\\bigl", "\\\\bigr", "\\\\displaystyle"):
+        t = t.replace(dead, " ")
+    for thin in ("\\\\,", "\\\\;", "\\\\!", "\\\\ "):     # 细空格命令，直接吃掉
+        t = t.replace(thin, "")
+    # 剩下的 \\sin / \\cos 之类：去掉反斜杠、留着名字，比整段消失强
+    t = _re.sub(r"\\\\([A-Za-z]+)", r"\\1", t)
+    for ch in ("{", "}", "$"):
+        t = t.replace(ch, "")
+    return " ".join(t.split())
+
+
+
+def _cells(tbl, rows, cols):
+    """
+    取表格的若干格（Polygon 的 VGroup）。行/列号从 1 开始，和 manim 的
+    Table.get_cell 一致 —— 索引基准刻意跟 manim 对齐，少一层翻译少一次错位。
+    """
+    return VGroup(*[tbl.get_cell((r, c)) for r in rows for c in cols])
+
+
+def _cells_center(tbl, rows, cols):
+    """若干格的共同中心（滑动窗口就是"挪到这个中心"）。"""
+    return _cells(tbl, rows, cols).get_center()
+
+
+def _cell_box(tbl, rows, cols, color=RED, stroke_width=3.5, buff=0.04):
+    """
+    正好框住表格若干格的方框。
+
+    为什么要有它：Manim 的 MobjectTable 单元格尺寸是**由内容撑出来的**
+    （h_buff=1.3 × 最宽条目），写死坐标的画框必然和网格错位 ——
+    2026-09-13 实测：模型用 rect(1.9×1.9) + move_to 去框 2×2 的格子，
+    框只盖住了半个格子区域，核的数字浮在框外。位置/大小都从格子算，
+    就永远不会错位。
+    """
+    return SurroundingRectangle(_cells(tbl, rows, cols), color=color,
+                                stroke_width=stroke_width, buff=buff)
 '''
 
 
@@ -418,6 +538,17 @@ ELEMENT_SPEC = {
             "outer_lines": (T_BOOL, True, "是否画外框"),
         },
     },
+    "cell_box": {
+        "desc": "表格选格框：正好框住 table 的若干格（讲卷积/滑动窗口用它，位置由格子决定，不会错位）",
+        "params": {
+            "of": (T_REF, None, "所属表格（kind=table）的元素 id"),
+            "rows": (T_LIST, None, "行号数组，从 1 开始，如 [1,2]"),
+            "cols": (T_LIST, None, "列号数组，从 1 开始，如 [1,2]"),
+            "color": (T_COLOR, "RED", "颜色"),
+            "stroke_width": (T_NUM, 3.5, "线宽"),
+            "buff": (T_NUM, 0.04, "相对格子边界的留白"),
+        },
+    },
     "legend": {
         "desc": "图例",
         "params": {
@@ -461,7 +592,7 @@ ELEMENT_SPEC = {
         "params": {
             "value": (T_COORD, 0.0, "数值，可写 \"$t\" 或含 tracker 的表达式，如 \"2*t\""),
             "decimals": (T_INT, 2, "小数位数 0~6"),
-            "unit": (T_STR, "", "单位后缀，如 \"\\,m^2\""),
+            "unit": (T_STR, "", "单位后缀，如 \"\\,m^2\"；中文单位（如 \" 块\"）也支持，会自动改用 Text 排版"),
             "font_size": (T_INT, 32, "字号"),
             "color": (T_COLOR, "ACCENT", "颜色"),
         },
@@ -484,33 +615,48 @@ ELEMENT_SPEC = {
 ACTION_SPEC = {
     "create": {"desc": "Create：沿路径画出线条图形", "target": True, "run_time": 1.2},
     "write": {"desc": "Write：书写文字/公式", "target": True, "run_time": 1.0},
-    "fade_in": {"desc": "FadeIn：淡入（可带 shift 方向）", "target": True, "run_time": 0.6},
-    "grow": {"desc": "GrowFromCenter / GrowFromEdge：生长出现", "target": True, "run_time": 0.8},
+    "fade_in": {"desc": "FadeIn：淡入（可带 shift 方向）", "target": True, "run_time": 0.6,
+                "args": "shift"},
+    "grow": {"desc": "GrowFromCenter / GrowFromEdge：生长出现", "target": True, "run_time": 0.8,
+             "args": "from"},
     "draw_border": {"desc": "DrawBorderThenFill：先描边再填充", "target": True, "run_time": 1.2},
     "show": {"desc": "直接 add 上屏，无动画（动态元素用这个）", "target": True, "run_time": 0},
-    "transform": {"desc": "Transform：把一个元素变形为另一个", "target": True, "run_time": 1.6},
-    "replace": {"desc": "ReplacementTransform：替换式变形", "target": True, "run_time": 1.6},
-    "indicate": {"desc": "Indicate：闪烁强调", "target": True, "run_time": 1.0},
-    "circumscribe": {"desc": "Circumscribe：画圈圈强调", "target": True, "run_time": 1.0},
-    "flash": {"desc": "Flash：闪光", "target": True, "run_time": 0.8},
+    "transform": {"desc": "Transform：把一个元素变形为另一个", "target": True, "run_time": 1.6,
+                  "args": "into（目标元素 id，或内联一个元素对象）"},
+    "replace": {"desc": "ReplacementTransform：替换式变形", "target": True, "run_time": 1.6,
+                "args": "into（同上）"},
+    "indicate": {"desc": "Indicate：闪烁强调", "target": True, "run_time": 1.0, "args": "color"},
+    "circumscribe": {"desc": "Circumscribe：画圈圈强调", "target": True, "run_time": 1.0,
+                     "args": "color"},
+    "flash": {"desc": "Flash：闪光", "target": True, "run_time": 0.8, "args": "color"},
     "wiggle": {"desc": "Wiggle：抖动", "target": True, "run_time": 1.0},
     "focus": {"desc": "FocusOn：聚焦光圈", "target": True, "run_time": 0.8},
     "fade_out": {"desc": "FadeOut：淡出", "target": True, "run_time": 0.5},
     "remove": {"desc": "直接移除，无动画", "target": True, "run_time": 0},
-    "shift": {"desc": "平移", "target": True, "run_time": 0.8},
-    "move_to": {"desc": "移动到指定点", "target": True, "run_time": 0.8},
-    "scale": {"desc": "缩放", "target": True, "run_time": 0.7},
-    "rotate": {"desc": "旋转（角度制）", "target": True, "run_time": 1.0},
-    "set_color": {"desc": "改颜色", "target": True, "run_time": 0.5},
-    "set_opacity": {"desc": "改不透明度", "target": True, "run_time": 0.5},
-    "set_stroke": {"desc": "改描边（颜色/线宽）", "target": True, "run_time": 0.5},
-    "stretch": {"desc": "沿某方向拉伸", "target": True, "run_time": 0.8},
-    "move_along": {"desc": "沿某条曲线移动", "target": True, "run_time": 2.0},
-    "trace": {"desc": "给动点加拖尾轨迹（TracedPath）", "target": True, "run_time": 0},
-    "tracker_to": {"desc": "驱动追踪器变化（带它的元素会自动跟着动）", "target": True, "run_time": 3.0},
-    "wait": {"desc": "停顿", "target": False, "run_time": 0.5},
+    "shift": {"desc": "平移", "target": True, "run_time": 0.8,
+              "args": "vector（必须写 vector=[dx,dy]，不是 point）"},
+    "move_to": {"desc": "移动到指定点", "target": True, "run_time": 0.8,
+                "args": "point=[x,y] / {ref,x,y} / {of,anchor}（写 to= 也认，但请统一写 point）"},
+    "move_cells": {"desc": "把 cell_box 滑到另一组格子上（格子对齐，不会错位）",
+                   "target": True, "run_time": 1.0,
+                   "args": "of（表格 id）+ rows/cols（目标格号，行/列号从 1 开始）"},
+    "scale": {"desc": "缩放", "target": True, "run_time": 0.7, "args": "factor"},
+    "rotate": {"desc": "旋转（角度制）", "target": True, "run_time": 1.0, "args": "angle"},
+    "set_color": {"desc": "改颜色", "target": True, "run_time": 0.5, "args": "color"},
+    "set_opacity": {"desc": "改不透明度", "target": True, "run_time": 0.5, "args": "opacity"},
+    "set_stroke": {"desc": "改描边（颜色/线宽）", "target": True, "run_time": 0.5,
+                   "args": "color / width"},
+    "stretch": {"desc": "沿某方向拉伸", "target": True, "run_time": 0.8, "args": "factor / dim(x|y)"},
+    "move_along": {"desc": "沿某条曲线移动", "target": True, "run_time": 2.0,
+                   "args": "path（曲线元素 id）"},
+    "trace": {"desc": "给动点加拖尾轨迹（TracedPath）", "target": True, "run_time": 0,
+              "args": "color / width"},
+    "tracker_to": {"desc": "驱动追踪器变化（带它的元素会自动跟着动）", "target": True, "run_time": 3.0,
+                   "args": "to（目标数值）+ rate_func"},
+    "wait": {"desc": "停顿", "target": False, "run_time": 0.5, "args": "time"},
     "clear_all": {"desc": "FadeOut 并移除所有元素（一键清屏）", "target": False, "run_time": 0.5},
-    "parallel": {"desc": "并行执行多个子动作（每个可有独立 run_time）", "target": False, "run_time": None},
+    "parallel": {"desc": "并行执行多个子动作（每个可有独立 run_time）", "target": False, "run_time": None,
+                 "args": "actions（子动作数组）"},
 }
 
 
@@ -670,6 +816,30 @@ def _check_range(v, where):
     return v
 
 
+def _check_cell_ids(v, where, max_n=6):
+    """
+    格号数组（cell_box 的 rows / cols）。行、列号都**从 1 开始**。
+
+    为什么从 1 开始：manim 的 `Table.get_cell((r, c))` 就是 1-based。DSL 里换成
+    0-based 的话，代码里每次取格都要 +1 换算一遍 —— 那是给自己造错位的机会，
+    而错位是"画面能出、内容全错"的静默失败。索性跟 manim 对齐，只有一种基准。
+    """
+    if not isinstance(v, list) or not v:
+        raise DSLError(f"{where}: 需要非空的格号数组，如 [1,2]（行/列号从 1 开始）")
+    if len(v) > max_n:
+        raise DSLError(f"{where}: 格号太多（{len(v)} 个），最多 {max_n} 个")
+    out = []
+    for i, x in enumerate(v):
+        if isinstance(x, bool) or not isinstance(x, int):
+            raise DSLError(f"{where}[{i}]: 格号必须是整数，收到 {x!r}")
+        if x < 1:
+            raise DSLError(f"{where}[{i}]: 格号从 1 开始，收到 {x}")
+        out.append(x)
+    if len(set(out)) != len(out):
+        raise DSLError(f"{where}: 格号不能重复（{out}）")
+    return sorted(out)
+
+
 # 每种元素的必填参数（不写就一定会生成出错误代码，必须在校验期拦掉）
 REQUIRED = {
     "text": ["content"], "formula": ["content"],
@@ -678,7 +848,7 @@ REQUIRED = {
     "dot": ["at"], "line": ["start", "end"], "arrow": ["start", "end"],
     "polygon": ["points"], "angle": ["a", "vertex", "c"],
     "brace": ["of"], "table": ["rows"], "legend": ["items"],
-    "highlight": ["of"], "group": ["items"],
+    "highlight": ["of"], "group": ["items"], "cell_box": ["of", "rows", "cols"],
     "tangent_line": ["axes", "expr"], "normal_line": ["axes", "expr"],
 }
 
@@ -736,6 +906,16 @@ def _norm_element(el, declared, trackers, where):
         for it in out["items"]:
             if not isinstance(it, str) or it not in declared:
                 raise DSLError(f"{where}.items: 引用了未声明的元素 {it!r}")
+
+    if kind == "cell_box":
+        # 位置完全由格子决定 —— 允许 place 的话，框会被挪走，又变成"框和数字错位"。
+        if "place" in el:
+            raise DSLError(
+                f"{where}: cell_box 的位置由格子算出来，不能写 place"
+                "（要让它滑到别的格子请用 {\"do\":\"move_cells\"} 动作）"
+            )
+        out["rows"] = _check_cell_ids(out["rows"], f"{where}.rows")
+        out["cols"] = _check_cell_ids(out["cols"], f"{where}.cols")
 
     if kind == "tracker":
         trackers.add(eid)
@@ -966,7 +1146,32 @@ def _norm_action(ac, declared, trackers, where):
                          _as_num_or_ref(v[1], f"{where}.vector[1]")]
 
     if do == "move_to":
-        out["point"] = _check_point(ac["point"], f"{where}.point", declared)
+        # 以前这里是 ac["point"]：模型漏写 point（或写成 to / target_point）时
+        # 直接 KeyError 冒到路由层，整个请求 500，用户看到"服务端异常"。
+        # 漏参数是**模型输出**的问题，应该按 DSLError 报出来让重试机制回灌纠正。
+        pt = ac.get("point", ac.get("to", ac.get("target_point")))
+        if pt is None:
+            raise DSLError(
+                f"{where}: move_to 需要 point=[x, y] / {{ref,x,y}} / {{of,anchor}}"
+                f"（收到键 {sorted(ac)}）"
+            )
+        out["point"] = _check_point(pt, f"{where}.point", declared)
+
+    if do == "move_cells":
+        # 滑动窗口：把 cell_box 挪到另一组格子。位置由表格算出来，所以模型
+        # 不需要（也不允许）自己估坐标 —— 估坐标就是错位的来源。
+        tbl = ac.get("of")
+        if not isinstance(tbl, str) or tbl not in declared:
+            raise DSLError(
+                f"{where}: move_cells 需要 of=表格元素 id"
+                f"（收到 {tbl!r}）。例：{{\"do\":\"move_cells\",\"target\":\"win\","
+                "\"of\":\"img\",\"rows\":[1,2],\"cols\":[2,3]}"
+            )
+        out["of"] = tbl
+        if ac.get("rows") is not None:
+            out["rows"] = _check_cell_ids(ac["rows"], f"{where}.rows")
+        if ac.get("cols") is not None:
+            out["cols"] = _check_cell_ids(ac["cols"], f"{where}.cols")
 
     if do == "scale":
         out["factor"] = _as_num_or_ref(ac.get("factor", 1.2), f"{where}.factor")
@@ -1071,6 +1276,93 @@ def _scan_point_exprs(obj):
     return out
 
 
+def _check_cell_refs(where_root, norm_els, norm_acts):
+    """
+    格相关引用的**类型**校验（declared 只保证 id 存在，不看 kind，所以必须在这里补一遍）。
+
+    重点拦三件事：
+      1. cell_box 的 of 必须真的是 table（指向 rect 会生成出取不到格子的代码）；
+      2. 用 move_to / shift 去挪 cell_box —— 那是"自己估坐标"，实测必然和网格错位
+         （2026-09-13：1.9×1.9 的框去套 2×2 格子，只盖住半格）。直接报错，
+         让重试机制把"请用 move_cells"这句话喂回给模型；
+      3. 被框着的表格再做 scale/shift：框是建表时算好的，表格一动框就不跟了。
+    """
+    byid = {el["id"]: el for el in norm_els}
+    kinds = {k: v["kind"] for k, v in byid.items()}
+
+    def _table_of(eid, where):
+        el = byid.get(eid)
+        if el is None or el["kind"] != "table":
+            raise DSLError(
+                f"{where}: of={eid!r} 必须指向一个 table 元素"
+                f"（收到 {kinds.get(eid, '未声明')}）"
+            )
+        return el
+
+    def _in_range(rows, cols, tbl, where):
+        n_rows, n_cols = len(tbl["rows"]), max(len(r) for r in tbl["rows"])
+        if rows[-1] > n_rows or cols[-1] > n_cols:
+            raise DSLError(
+                f"{where}: 格号超出表格范围（表格 {n_rows}×{n_cols}，"
+                f"rows={rows}, cols={cols}）"
+            )
+
+    for el in norm_els:
+        if el["kind"] != "cell_box":
+            continue
+        w = f"{where_root}.elements: cell_box {el['id']!r}"
+        tbl = _table_of(el["of"], w)
+        _in_range(el["rows"], el["cols"], tbl, w)
+
+    for i, ac in enumerate(norm_acts):
+        w = f"{where_root}.timeline[{i}]"
+        if ac["do"] == "move_cells":
+            tgt_id = ac["target"][0]
+            tgt = byid.get(tgt_id)
+            if tgt is None or tgt["kind"] != "cell_box":
+                raise DSLError(
+                    f"{w}: move_cells 只能驱动 cell_box 元素"
+                    f"（{tgt_id!r} 是 {kinds.get(tgt_id, '未声明')}）"
+                )
+            tbl = _table_of(ac["of"], w)
+            # 没给 rows/cols 就沿用这个框自己声明的那组（等于原地重播一次）
+            rows = ac.get("rows") or tgt["rows"]
+            cols = ac.get("cols") or tgt["cols"]
+            if len(rows) != len(tgt["rows"]) or len(cols) != len(tgt["cols"]):
+                raise DSLError(
+                    f"{w}: 换一组格子时框的大小不能变"
+                    f"（框声明的是 {len(tgt['rows'])}×{len(tgt['cols'])}，"
+                    f"这次给的是 {len(rows)}×{len(cols)}）——大小一变框就和格子错位"
+                )
+            _in_range(rows, cols, tbl, w)
+            # 补全后交给 codegen 直接用，避免在那里再判一次默认值
+            ac["rows"], ac["cols"] = rows, cols
+        elif ac["do"] in ("move_to", "shift"):
+            for t in ac["target"]:
+                if kinds.get(t) == "cell_box":
+                    raise DSLError(
+                        f"{w}: {ac['do']} 作用在 cell_box 上会和网格错位 —— "
+                        '请改用 {"do":"move_cells","target":"%s","of":"<表格id>",'
+                        '"rows":[...],"cols":[...]}' % t
+                    )
+
+    # 被 cell_box 框着的表格：不能再缩放/平移/旋转。
+    # 框是**建表时**按格子算出来的一次性结果，表格一动，框就留在原地不动了 ——
+    # 又是"能渲染、但内容错"。要调整表格大小请改 font_size（格子尺寸随内容走）。
+    watched = {el["of"] for el in norm_els if el["kind"] == "cell_box"}
+    if watched:
+        for i, ac in enumerate(norm_acts):
+            if ac["do"] not in ("scale", "stretch", "shift", "move_to", "rotate"):
+                continue
+            for t in ac["target"]:
+                if t in watched:
+                    raise DSLError(
+                        f"{where_root}.timeline[{i}]: {t!r} 正被 cell_box 框着，"
+                        f"不能再对它做 {ac['do']}（框会留在原地、和格子错位）；"
+                        "想改表格大小请调它的 font_size"
+                    )
+
+
 def validate_scene(scene, idx):
     """
     校验一个 v2 分镜（elements + timeline）。返回规范化 dict。
@@ -1100,6 +1392,8 @@ def validate_scene(scene, idx):
     norm_acts = []
     for i, ac in enumerate(timeline):
         norm_acts.append(_norm_action(ac, declared, trackers, f"{where_root}.timeline[{i}]"))
+
+    _check_cell_refs(where_root, norm_els, norm_acts)
 
     # 表达式里出现的标识符：不是 x、不是数学函数，就必须是已声明的 tracker。
     # 不查这一遍，写错名字只会让 _safe_eval 抛异常并兜底成 0 —— 画面能出、内容全错，
@@ -1220,9 +1514,12 @@ class _Builder:
             # DecimalNumber 不能走 always_redraw：它每帧要重建整个对象并重排文字
             # （内部走 Pango），实测是动态场景里最贵的一项。
             # 改成"建一次 + 只更新数值"，定位也就只需算一次。
+            # 刷新走 _set_number 而不是 m.set_value：带中文单位的数字是个 VGroup，
+            # 没有 set_value（见运行时 helper 里那段说明）。
             self.lines.append(f"        {var} = {expr}")
             self.lines.append(
-                f"        {var}.add_updater(lambda m: m.set_value({self._coord(el['value'])}))"
+                f"        {var}.add_updater(lambda m: _set_number(m, "
+                f"{self._coord(el['value'])}))"
             )
             for c in calls:
                 self.lines.append(f"        {var}{c}")
@@ -1448,6 +1745,13 @@ class _Builder:
         return (f'MobjectTable([{rows}], '
                 f'include_outer_lines={"True" if el["outer_lines"] else "False"})')
 
+    def _mk_cell_box(self, el):
+        # 注意：build() 先把依赖（of 指向的 table）建好、定位、_fit 完，才轮到这一步，
+        # 所以这里取到的格子就是表格**最终位置**上的格子。
+        return (f'_cell_box({_V}{el["of"]}, {el["rows"]}, {el["cols"]}, '
+                f'color={_color(el["color"])}, stroke_width={_num(el["stroke_width"])}, '
+                f'buff={_num(el["buff"])})')
+
     def _mk_legend(self, el):
         items = ", ".join(
             f'[{_color(it[0])}, r"""{_esc(it[1])}"""]' for it in el["items"]
@@ -1507,8 +1811,10 @@ class _Builder:
         )
 
     def _mk_number(self, el):
+        # 不直接生成 DecimalNumber：单位可能是中文，那种情况进 MathTex 必崩
+        # （实测 `"unit": " 块"` → 整个分镜渲不出来）。分流交给运行时 _number。
         unit = f', unit=r"""{_esc(el["unit"])}"""' if el.get("unit") else ""
-        return (f'DecimalNumber({self._coord(el["value"])}, '
+        return (f'_number({self._coord(el["value"])}, '
                 f'num_decimal_places={el["decimals"]}{unit}, '
                 f'font_size={el["font_size"]}, color={_color(el["color"])})')
 
@@ -1651,6 +1957,10 @@ class _Builder:
                     f"{_num(ac['vector'][1])}, 0]))")
         if do == "move_to":
             return f"{var}.animate.move_to({self._point_code(ac['point'])})"
+        if do == "move_cells":
+            # 目标位置由目标格子算出来（validate 阶段已保证 rows/cols 齐全且大小一致）
+            return (f"{var}.animate.move_to(_cells_center({_V}{ac['of']}, "
+                    f"{ac['rows']}, {ac['cols']}))")
         if do == "scale":
             return f"{var}.animate.scale({_num(ac['factor'])})"
         if do == "rotate":
@@ -1752,9 +2062,13 @@ def describe(include_place=True) -> str:
     out.append("## 动作（do）")
     for k, spec in ACTION_SPEC.items():
         need = "需要 target" if spec["target"] else "无需 target"
-        out.append(f"- **{k}**（{need}，默认 run_time={spec['run_time']}）：{spec['desc']}")
+        extra = f"，附加参数：{spec['args']}" if spec.get("args") else ""
+        out.append(f"- **{k}**（{need}，默认 run_time={spec['run_time']}）：{spec['desc']}{extra}")
     out.append("")
     out.append("target 可以是元素 id、id 数组（并行播放），或直接内联一个元素对象。")
+    out.append("⚠️ 附加参数的名字是**写死的**，按上面括号里写的来：move_to 用 `point`、"
+               "shift 用 `vector`、tracker_to 用 `to`、move_cells 用 `of`+`rows`/`cols`。"
+               "名字写错（或漏写）会直接被拒绝重做。")
     out.append("")
 
     out.append("## 动态效果（重点）")
@@ -1764,10 +2078,23 @@ def describe(include_place=True) -> str:
     out.append("3. 用 `{\"do\":\"tracker_to\",\"target\":\"t\",\"to\":6.28,\"run_time\":5,\"rate_func\":\"linear\"}` 驱动")
     out.append("4. 函数表达式里可直接写 tracker 名，如 `\"expr\":\"sin(x + t)\"`")
     out.append("5. 需要跟着动但自己不引用 tracker 的元素（例如始终套在动点外的框），加 `\"live\": true`")
-    out.append("6. 实时显示数值用 `number` 元素，`\"value\":\"2*t\"` 会随 tracker 刷新")
+    out.append("6. 实时显示数值用 `number` 元素，`\"value\":\"2*t\"` 会随 tracker 刷新；"
+               "`\"unit\"` 是显示在数字右边的单位后缀，写中文（如 `\" 块\"`）没问题")
     out.append("")
     out.append("含 tracker 引用（或 live）的元素会被渲染成 always_redraw 对象：")
     out.append("**它们不会自动上屏，要用 `{\"do\":\"show\",\"target\":\"...\"}` 显式 add。**")
+    out.append("")
+    out.append("## 网格与滑动窗口（卷积 / 池化 / 棋盘格 / 矩阵）")
+    out.append("讲这类内容：格子用 `table`（数字天然落在格子里，不要用 text 拼多行数字），")
+    out.append("框选/滑动的窗口用 `cell_box` —— 它的位置和大小都由格子算出来，**绝不会和网格错位**：")
+    out.append("```")
+    out.append('{"id":"img","kind":"table","rows":[["1","0","1"],["0","1","0"],["1","1","0"]]}')
+    out.append('{"id":"win","kind":"cell_box","of":"img","rows":[1,2],"cols":[1,2],"color":"RED"}')
+    out.append('{"do":"move_cells","target":"win","of":"img","rows":[1,2],"cols":[2,3],"run_time":1}')
+    out.append("```")
+    out.append("行号/列号**从 1 开始**（左上角是第 1 行第 1 列）。")
+    out.append("⚠️ 不要用 `rect` + `move_to` 自己估坐标去框格子：表格格子的尺寸是内容撑出来的，")
+    out.append("估出来的框一定会歪（校验层也会直接拒绝 cell_box 上的 move_to/shift）。")
     out.append("")
     out.append("## 组合动画")
     out.append("- **parallel**：并行执行多个子动作，每个可有独立 run_time。")

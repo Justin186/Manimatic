@@ -12,6 +12,8 @@
                —— 推荐。元素自由组合 + 动作自由编排，详见 dsl.py
 """
 
+import traceback
+
 from . import dsl
 
 # 允许的颜色（防止大模型写出不存在的颜色常量）
@@ -212,7 +214,20 @@ def validate(storyboard: dict, registry: dict) -> dict:
         # 判定条件很宽松：只要出现 elements 或 timeline 之一就走 DSL 分支，
         # 剩下的交给 dsl.validate_scene 报出精确错误（比如"有 elements 却没 timeline"）。
         if "elements" in sc or "timeline" in sc:
-            dsl_scene = dsl.validate_scene(sc, sid)
+            try:
+                dsl_scene = dsl.validate_scene(sc, sid)
+            except dsl.DSLError:
+                raise
+            except Exception as e:
+                # 兜底：校验器自己踩到 KeyError/TypeError（模型给了个没预料到的
+                # 字段组合）时，不能让它冒到路由层变成"服务端异常 500"。
+                # 转成 SchemaError → llm 的重试机制会把错误回灌给模型再生成一次。
+                # 原始堆栈照打，免得真 bug 被这层吃掉。
+                traceback.print_exc()
+                raise SchemaError(
+                    f"scene {sid}: 结构不合规（{type(e).__name__}: {e}），"
+                    "请检查 elements/timeline 里各动作的必需参数是否写全"
+                ) from e
             dsl_scene["id"] = sid
             dsl_scene["mode"] = "dsl"
             out["scenes"].append(dsl_scene)

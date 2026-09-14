@@ -367,14 +367,14 @@ D:\Manimatic\
 
 一个 tracker 同时驱动动点、切线和斜率数字 —— 这是旧模板做不到的联动。
 
-**元素库 20 种**：`text` `formula` `axes` `number_plane` `plot` `parametric` `area`
+**元素库 26 种**：`text` `formula` `axes` `number_plane` `plot` `parametric` `area`
 `riemann` `dot` `line` `arrow` `circle` `ellipse` `rect` `polygon` `angle` `brace`
-`table` `legend` `highlight` `number` `tracker` `group`
+`table` `cell_box` `legend` `highlight` `tangent_line` `normal_line` `number` `tracker` `group`
 
-**动作库 26 种**：`create` `write` `fade_in` `grow` `draw_border` `show` `transform`
+**动作库 30 种**：`create` `write` `fade_in` `grow` `draw_border` `show` `transform`
 `replace` `indicate` `circumscribe` `flash` `wiggle` `focus` `fade_out` `remove`
-`shift` `move_to` `scale` `rotate` `set_color` `set_opacity` `set_stroke` `stretch`
-`move_along` `trace` `tracker_to` `wait`
+`shift` `move_to` `move_cells` `scale` `rotate` `set_color` `set_opacity` `set_stroke` `stretch`
+`move_along` `trace` `tracker_to` `wait` `clear_all` `parallel`
 
 完整规格不用手写 —— `storyboard/dsl.py` 里 `ELEMENT_SPEC` / `ACTION_SPEC` 一份定义，
 校验和文档都从它生成：
