@@ -55,6 +55,20 @@
 > **同日再补一条（渲染）**：修掉「某个分镜一直重试失败」的一个真根因 ——
 > 模型给动态数字写了中文单位（`"unit": " 块"`），而 `DecimalNumber(unit=...)` 内部走
 > MathTex，中文必然 `LaTeX Error: Unicode character 块 ...`。见 §8.25。
+>
+> **2026-09-15：终于有了第一个测试。** `tests/test_normalize_idempotent.py`（29 条）——
+> 把 §8.8 里挂了很久的"幂等回归测试"兑了现，并**修掉 5 个规范化不幂等点**
+> （§8.6 表里那 4 个 + 写测试时新抓到的 `_dropped` 自我污染）。
+> 验证做到三层：29 条测试全绿、**22 份示例生成的 44 个源码文件逐字节零差异**、
+> 真渲一份端到端出片。见 §8.26。
+> 改了 `dsl._norm_*` / `schema.validate` 请跑 `python -m pytest tests -q`（<1 秒）。
+>
+> **同日再补：`parallel` 真并行做掉了**（§8.27）。它原来生成的是多条顺序 `self.play` ——
+> 也就是"写的是并行、跑的是串行"，属于契约型静默失效。
+> 顺带被测试抓出**第二个静默失效**：`.animate.scale(x).set_run_time(0.4)` 会被无声忽略
+> （`set_run_time` 不在 Mobject 上），正确写法是 `.animate(run_time=0.4).scale(x)`。
+> 验证做到四层：39 条测试全绿、实测时长 = max、**非 parallel 路径 44 个源码文件
+> 逐字节零差异**、端到端真渲出片。
 
 ---
 
@@ -303,8 +317,8 @@ data: {"index": 0, "url": "/media/.../s1.mp4", "durationSec": 5.0}
 | 11 | 修复 replace-scene「假通过校验」 | ✅ | 规范化产物被写回 raw 槽位 → `_validate()` 规范化第二遍，而规范化不幂等（`plot.x_range` 默认 `None`）。`regenerate_scene()` 改为返回 raw。见 §8.6 |
 | 12 | 修复 `parallel` 子动作被丢弃 | ✅ | `_norm_action()` 漏了 `parallel` 分支 → 写了等于没写（不报错、不上屏）；已补递归规范化。**仍不是真并行**，见 §8.7 |
 | 13 | 密钥与配置端到端验证 | ✅ | DeepSeek 直连 `/api/chat` 5.2–8.2s、首 `text_delta` +0.97s；`confirm` 热段 +5.7s / 冷启 +49.9s。启动横幅直接打印生效的 `模型 @ base_url` + `json_mode / temperature / max_tokens` |
-| 14 | 规范化幂等的回归测试 | 待办 | 只是**建议、还没写**：断言 `schema.validate(schema.validate(raw))` 不报错。现在这条性质**不成立**（§8.6 表里 4 个点都还在）。它是 11、12 这类"混装/漏带"的通用哨兵，见 §8.8 |
-| 15 | `parallel` 改成真并行 | 待办 | `act()` 先把子动作编译成"动画表达式"、再合成**一条** `self.play(...)`；**同时**要把 `_est_action_time()` 从求和改回取 max（两处是一对）。属渲染语义变更，见 §8.7 |
+| 14 | 规范化幂等的回归测试 | ✅ | `tests/test_normalize_idempotent.py`（29 条）。**写测试时又抓出第 5 个不幂等点**（`_dropped` 自我污染），§8.6 表里那 4 个点也全部复现并已修。已验证渲染输出零变化 + 真渲一份 4 分镜通过。见 §8.26 |
+| 15 | `parallel` 改成真并行 | ✅ | 已做（§8.27）：子动作编译成动画表达式、合成**一条** `self.play(...)`；`_est_action_time()` 同步改成 max。**写测试时抓出一个新静默失效**：`.animate.scale(x).set_run_time(0.4)` 会被无声忽略（`set_run_time` 不在 Mobject 上），正确形式是 `.animate(run_time=0.4).scale(x)`。见 §8.27 |
 | 16 | LLM 调用留档 | ✅ | `storyboard/llm_log.py`：每次调用（含**失败的中间轮**）落一行 JSONL 到 `output/_llm/calls.jsonl`，含完整 prompt / 回复原文 / usage。见 §8.9 |
 | 17 | LLM 回放（省 API 钱） | ✅ | `MSB_LLM_REPLAY=1`（或 CLI `--replay`）：同输入指纹命中留档就不发请求。**默认关**，开了会在启动横幅喊出来。见 §8.9 |
 | 18 | 修 JSON 解析：JS 简写键 + 报错定位 | ✅ | 模型会写 `"place":[{"center"}]`（缺 `: true`），根因是**我们的规格只列了键名没给带值示例**。规格补示例 + 解析层白名单兜底 + 报错带行列。见 §8.10 |
@@ -315,9 +329,12 @@ data: {"index": 0, "url": "/media/.../s1.mp4", "durationSec": 5.0}
 | 23 | 前端显示「正在思考…」 | ✅ | `web/src/components/workbench/ThinkingIndicator.tsx` + Workbench 分发 + Mock 也会发 `thinking_delta`。默认折叠只显示"已思考 N 秒"，正文一到自动收起。见 §8.12 |
 | 24 | 前端配置模型（设置页） | ✅ | `GET /api/llm/profiles` + `POST /api/llm/active` + `POST /api/llm/profile`；设置页可切换/新增档案。**密钥永不回传**（只回 `has_key`）。见 §8.14 |
 | 25 | 多轮对话上下文 | ✅ | 服务端存会话消息（`output/_tasks/messages/`），按 token 预算裁剪后拼进 messages。"生成对应视频"这类追问从"反问用户"变成正确指代。见 §8.16 |
-| 26 | 真·流式降级与容错打磨 | 待办 | 流式不可用时的降级已有（自动退回非流式）；还没做的是**真正的分段 LLM 调用** |
-| 25 | 配额与限流上生产 | 待办 | 内存计数在多进程/多实例下各算各的，需换 Redis；按 IP / 用户维度限流 |
-| 26 | 零间隔连播（fMP4 / HLS） | 待办 | 见 §5.5，属契约变更，不是当前阻塞 |
+| 27 | 真·流式降级与容错打磨 | 待办 | 流式不可用时的降级已有（自动退回非流式）；还没做的是**真正的分段 LLM 调用** |
+| 28 | 配额与限流上生产 | 待办 | 内存计数在多进程/多实例下各算各的，需换 Redis；按 IP / 用户维度限流 |
+| 29 | 零间隔连播（fMP4 / HLS） | 待办 | 见 §5.5，属契约变更，不是当前阻塞 |
+| 30 | 无 LaTeX 环境下 `number` 分镜整条渲不出 | 待办 | `_number()` 没有 `if not USE_LATEX:` 分支，而 `DecimalNumber` 内部走 MathTex。本机造不出"没装 LaTeX"的环境、没法实测，所以没动。见 §8.25 末尾 |
+| 31 | ~~`parallel` 改成真并行~~ | ✅ | **已做，见第 15 项与 §8.27**（原编号 15/31 重复，此处作废，保留编号只为不打破引用） |
+| 32 | 生产鉴权 | 待办 | `api/` 目前**零鉴权**（`/api/admin/cleanup` 是裸接口）；前端 `login` 是"点一下就进"的演示壳。上线前必须补 |
 
 **前端侧不用改一行**：`NEXT_PUBLIC_USE_MOCK=false` + `NEXT_PUBLIC_API_BASE_URL` 即可切换。
 
@@ -762,6 +779,10 @@ SSE 无 `error` 事件、`tool_result`/`tool_done` 齐全、落盘的分镜里�
 因此 `_est_action_time()` 对 parallel 按**求和**估（与实际行为一致）——
 **改成真并行时这里必须同时改成取 max，两处是一对**。
 
+> ✅ **2026-09-15 已做掉**，见 §8.27。上面这条保留作为历史记录，
+> 它当时对"两处是一对"的判断是对的 —— 真并行落地时确实两处都得改，
+> 而且还多出第三处（`_anim_timed()`，因为 run_time 没法拼在外层）。
+
 **验证**：规范化后 `actions` 保留 2 个子动作；生成的 construct() 里两条 `self.play` 都在；
 整段真渲一遍出 mp4（3.5s），SSE 无 `error`。
 
@@ -771,11 +792,13 @@ SSE 无 `error` 事件、`tool_result`/`tool_done` 齐全、落盘的分镜里�
 
 ### 8.8 给校验层加一条回归测试
 
-上面 8.6/8.7 都能用一条性质测出来，建议补进测试：
+上面 8.6/8.7 都能用一条性质测出来：
 **`schema.validate(schema.validate(raw))` 不应报错**（即规范化应当幂等）。
-现在这条性质是**不成立**的（见 8.6 的表，四个点都还没修）。
 它的价值在于：一旦哪天又有人把规范化产物喂回 raw 入口，测试会直接红，
 而不是等到线上出现"日志说通过、接口说失败"这种自相矛盾的现象。
+
+**2026-09-15 已落地** —— 见 §8.26。落地时把 §8.6 表里那四个点全部复现，
+并且**又抓出第五个不幂等点**（`_dropped` 自我污染）。
 
 ### 8.9 LLM 调用留档 + 回放：把「调 prompt」和「花钱调模型」解耦
 
@@ -1680,3 +1703,187 @@ Workbench 会被**卸载重挂载**。而流是 JS 的 promise —— **不会�
 但 `DecimalNumber` 照样走 MathTex —— 即**任何含 `number` 的分镜在无 LaTeX 环境下整条渲不出来**。
 修法是在 `_number` 里补一条 `if not USE_LATEX:` 分支（整块退化成 Text，`_set_number` 走
 `Text.setText`）；本机造不出"没有 latex"的环境、没法实测，所以没动。
+（已记为任务清单第 30 项。）
+
+### 8.26 规范化幂等的回归测试落地（§8.8 的兑现，顺带修掉 5 个不幂等点）
+
+**背景**：§8.8 早就写明"建议补一条幂等回归测试"，但一直只是**建议** ——
+全仓一个测试文件都没有，`requirements.txt` 里也没有 pytest。
+2026-09-15 把它兑成了 `tests/test_normalize_idempotent.py`（29 条）。
+
+**先证明问题真实存在**（不是照着文档抄）：写测试前先跑了一个探针，
+对 `examples/*.json` 逐份做 `validate(validate(raw))`，结果是
+**22 份里 3 份直接报错**：
+
+```
+scene[1].elements[1].place[0]: 每条 place 只能有一个布局键（可另加 buff），
+收到 ['aligned', 'buff', 'direction', 'next_to']
+```
+
+那四个键**是它自己上一遍补出来的** —— 函数否定了自己的输出。
+
+**写测试时又抓出第 5 个不幂等点**（§8.6 表里没有它）：
+
+```
+第一遍: "_dropped": []
+第二遍: "_dropped": ["_dropped"]      ← 它把自己的输出当成了未知参数
+```
+
+根因是 `_norm_element()` 算未知参数时用了
+`set(el.keys()) - set(spec) - {"id","kind","place","live"}` ——
+把自己产出的兜底键 `_dropped` 也当成了"模型多写的键"。
+
+**五个不幂等点与修法**（全部在 `storyboard/dsl.py`）：
+
+| # | 形态 | 为什么不幂等 | 修法 |
+|---|---|---|---|
+| 1 | `plot` 没写 `x_range` | 第一遍补成 `None`，第二遍按"非法范围"报错 | 可选参数（`ELEMENT_SPEC` 默认值为 `None`）**没写就不写进输出**，不补 `None` |
+| 2 | `circle` 没写 `at` | 同上 | 同上 |
+| 3 | `place: [{next_to:{...}}]` | 第一遍展平成 4 个键，第二遍判成"多个布局键" | `_norm_place()`**先认自己展平过的形态**；且 `aligned` 为空时**不写这个键**（写 `null` 会让形态对不上） |
+| 4 | 动作里内联定义元素 | 第一遍转成 `target:[id]`+`inline:{...}`，而 id 不在 `declared` 里 → 第二遍报"引用了未声明的元素" | 识别 `inline`/`inline_into` 里的 id 也算"已声明"，并把内联元素原样带走 |
+| 5 | 任意元素 | `_dropped` 自我污染（新发现） | 计算未知参数时排除 `_dropped` |
+
+**1 和 2 的修法刻意选在源头**：`_norm_value()` 里加一条 `if v is None: return None`，
+再由 `_norm_element()` 决定"是补默认值还是就保持没写"。
+不在 `_norm_value` 里直接报错 —— 那样所有可选参数就都得写一遍。
+
+**验证（三层，缺一层都不算数）**：
+
+1. **29 条测试全绿**（原先 9 条红）。含 §8.6 表里四个点各一条定点用例 +
+   §8.7 的 `parallel` 哨兵 + 一条"规范化产物里不得残留 `None` 可选参数"的结构性断言。
+2. **渲染输出零变化**：把改动前（`git checkout HEAD -- storyboard/dsl.py`）与改动后
+   各自对全部 22 份示例生成 Manim 源码（`render()` 与 `render_split()` 两条路径），
+   **44 个文件逐字节完全相同，0 差异**。
+   这一步是必须的 —— 测试只能证明"规范化自洽了"，证明不了"画面代码没变"。
+   （做完立刻把改动文件还原回去，并核对 `git diff --stat` 与预期一致。）
+3. **真渲一份端到端**：`free_derivative.json`（就是上面报错的三份之一，
+   改动前**连校验都过不了**）→ 4 个分镜全部出片，25.9s；
+   成片时长 35.73s = 四段之和，`sections/` 与 `index.json` 齐全。
+
+**这次临时踩的两个坑**（都是"没跑就写"）：
+
+- 探针里猜 `schema.validate(raw)` 的签名，23 个文件齐报
+  `missing 1 required positional argument: 'registry'` —— 真实签名是 `validate(storyboard, registry)`。
+- 探针里猜 `render_split()` 返回 `list[str]`，实际是 `[(scene_id, src), ...]`。
+  两次都是**运行才知道**，正好说明这类脚本的价值：手工看一次容易"哦没报错"就过去了，
+  脚本会直接告诉你"0 个文件真的被检查过"（假通过）。
+
+**临时探针用完即删**：排查时写过两个脚本（幂等探针、源码对比），都没留下来 ——
+它们的能力现在由 `tests/` 覆盖（`examples/*.json` 是 parametrize 出来的，
+哪份失败会直接报在测试名里）。**故意不留在 `output/` 下**：那个目录是被 gitignore
+且可能被清理的，把工具放在那里等于"下次想用已经没了"。
+
+**给以后的规矩**：改了 `dsl._norm_*` 或 `schema.validate`，**跑一遍**
+`python -m pytest tests -q`（不到 1 秒）。
+这条测试是 §8.6/§8.7 那类"静默失效"的通用哨兵 ——
+它们的症状是"两个闸互相矛盾"，靠肉眼和日志都很难定位，但测试一眼就能看出来。
+
+### 8.27 `parallel` 真并行：一个"从来没兑现过的承诺"，以及顺带抓出的第二个静默失效
+
+#### 先说它原来错在哪
+
+`parallel` 的字面承诺是"这些子动作**同时**演"，但 2026-09-15 之前它生成的是
+**多条独立的 `self.play(...)`**：
+
+```python
+# 旧行为：串行，总共 3 秒
+self.play(Create(c1), run_time=2)      # 先演 2 秒
+self.play(Write(t1), run_time=1)       # 再演 1 秒
+
+# 新行为：一条 play 带两个动画，总共 2 秒
+self.play(Create(c1, run_time=2), Write(t1, run_time=1))
+```
+
+这不是"性能优化"，是**语义修复**：写的是并行、跑的却是串行。
+用户的观感差别很实在 —— "圆画出来的同时旁边给出公式"变成了"圆画完再写公式"。
+（§8.7 修的是更严重的"子动作被整个丢掉"，那时候至少还是"写了没做"，
+现在是"写了、做了、但做成了另一件事"。）
+
+#### 实现：三条读源码确认过的事实（都没有猜）
+
+| 事实 | 出处 |
+|---|---|
+| 一条 play 的总时长 = `max(各动画 run_time)` | `manim/scene/scene.py` 的 `get_run_time()` |
+| 子动画的 `run_time` 决定它在共同时间轴上的结束时刻 | `manim/animation/composition.py` 的 `build_animations_with_timings()` |
+| `.animate` 链上传 run_time **只能**写成调用形式，且必须在方法之前 | `manim/mobject/mobject.py` 的 `_AnimationBuilder.__call__` |
+
+所以"同时开始、各自按时长结束、整段 = max"就是 manim 的默认行为，
+**不需要 `AnimationGroup`** —— 反而有三个理由不该嵌它：
+
+1. `AnimationGroup` 不缩放子动画时长（`composition.py` 里 `build_animations_with_timings`
+   用的是子动画**原始** run_time，没乘 rate_func），那"嵌一层"就只是多一层转译；
+2. 摊平后 `max(a, max(b, c))` 与 `max(a, b, c)` **恒等**，语义完全不变；
+3. 嵌进去之后 `_est_action_time()` 也得跟着递归处理嵌套 ——
+   而"两处必须同时改"正是本项目最容易漏的一类（§8.7 的教训）。
+
+#### ⚠️ 顺带抓出的第二个静默失效：`.animate.scale(x).set_run_time(0.4)` 无声无效
+
+第一版给 `.animate` 类子动作注入时长时，想当然写成了
+
+```python
+c.animate.scale(1.2).set_run_time(0.4)      # ✗ 时长仍是默认的 1.0s，不报错
+```
+
+**它被静默忽略了。** 原因是 `set_run_time` 是 `Animation` 上的方法、
+**不在 `Mobject` 上**（实测 `hasattr(Mobject, "set_run_time") == False`），
+于是 `_AnimationBuilder.__getattr__` 把它当成普通的目标方法转发到
+`mobject.target`，然后什么都不发生。三种写法实测：
+
+| 写法 | 实测时长 |
+|---|---|
+| `c.animate(run_time=0.4).scale(1.2)` | **0.400s** ✅ |
+| `c.animate.scale(1.2).set_run_time(0.4)` | 1.000s ❌（被忽略） |
+| `c.animate.scale(1.2)` | 1.000s（默认值，对照） |
+
+**是测试抓出来的，不是我看代码看出来的** —— 这条如果漏掉，症状会是
+"估时 0.4s、实际演 1.0s"的时长漂移，而报错一个都没有。
+现在 `tests/test_parallel.py` 里专门留了一条断言**证明 `.set_run_time` 确实无效**
+（断言它 `> 0.9`），这样将来若有人"简化"成那个更顺眼的写法，测试会立刻指出来。
+
+#### 三处必须同时改的地方（这次全改了，并写进了注释）
+
+| 位置 | 改动 |
+|---|---|
+| `_Builder._parallel()` | 子动作 → 动画表达式 → 合成**一条** `self.play(...)` |
+| `_est_action_time()` | `parallel` 的估算从 **`sum` 改成 `max`** |
+| `_anim_timed()`（新增） | 把各子动作自己的 run_time 注入到**它自己的表达式内部** |
+
+第三处为什么必须有：`self.play(Create(x), run_time=2, Write(y))` 是
+**Python 语法错误**（位置参数跟在关键字参数之后）—— 第一版就是这么写的，
+被 `renderer._check_syntax()` 的 `compile()` 兜底拦下了（那道闸存在的意义正在于此）。
+而 run_time **也不能**写在外层：manim 的 `_setup_animations()` 会把 play 的 kwargs
+挨个 setattr 到**每个**子动画上，把各自时长抹平。所以只能逐个注入。
+
+#### 降级路径：不能并行时**如实**顺序播放
+
+这些情况整段降级为顺序 `self.play`（画面仍然对，只是不并行），
+并在生成的代码里写明"降级为顺序播放"，不假装自己是并行的：
+
+| 情况 | 为什么 |
+|---|---|
+| 含 `show` / `remove` / `trace` | 它们是即时 `add`/`remove`，不是动画，manim 的 `self.play` 不接受 |
+| 同一个元素被两个子动作碰 | 两条动画同时改同一属性，谁先生效取决于 manim 内部顺序；而"先放大再旋转"和"先旋转再放大"本来就不一样，**顺序语义才是对的** |
+| 子动作里有多个 target | 会展开成多条语句，塞不进一条 play（校验层已把它们拆成单 target 副本） |
+
+#### 验证（四层）
+
+1. **39 条测试全绿**（新增 `tests/test_parallel.py`，含上面那条"证明 `.set_run_time` 无效"）。
+2. **实测时长 = max**：一条 play 里 0.2s + 0.6s 两个动画，实测 **0.60s**（不是 0.8）。
+   这条测的是**我们对 manim 语义的假设本身** —— 它红了就说明 manim 改了行为，
+   `max` 需要重新论证。
+3. **非 parallel 路径零变化**：改动前后对全部 22 份示例生成 Manim 源码
+   （`render()` + `render_split()`），**44 个文件逐字节完全相同，0 差异**。
+   这是这次改动最重要的一条保险 —— 真并行只碰了 parallel 分支。
+4. **端到端真渲**：含 parallel 的分镜出片成功（13.5s）；
+   `估时 3.0` + 补 wait 1.0 + 尾随 0.3 ≈ 实测 **4.267s**，时长对得上。
+
+#### 一个我没做的事（写下来免得以后以为是漏了）
+
+`.animate` 类子动作**不给 `run_time` 时用 manim 的默认值（1.0s）**，
+而不是 DSL 里 `ACTION_SPEC` 写的默认值（如 `shift` 是 0.8s）。
+以前的路径是外层 `self.play(..., run_time=0.8)`，现在并行时没法这么写
+（会被平摊），要拿回 0.8 就得逐个注入 `set_run_time` —— 而那条路刚被证明是死的，
+唯一可行写法 `x.animate(run_time=0.8).shift(...)` 需要逐个动作把 `ACTION_SPEC`
+的默认值搬进表达式里。**当前只处理"模型显式写了 run_time"的情况**，
+没写就交给 manim 定。真并行下这已经比原来(整体一个 run_time)更精确了，
+所以没有再往下做。

@@ -87,6 +87,28 @@ python check_env.py
 会检查 Python 版本、manim、numpy、ffmpeg、LaTeX、dvisvgm、中文字体，
 最后跑一个 `SquareToCircle` 级别的 smoke test 并**输出渲染耗时**——这是你估算出片时间的基准。
 
+### 5. 测试
+
+```bash
+python -m pytest tests -q        # 不到 1 秒
+```
+
+守住的是「**规范化必须幂等**」这条性质：`schema.validate(validate(raw))` 必须与
+`validate(raw)` 完全一致。它为什么值得一条测试：一旦不成立，现象是
+**两个闸对同一份数据给出相反结论**（日志说"通过校验"、接口说"校验失败"），
+历史上 HANDOFF §8.6 / §8.7 两个静默失效 bug 都是它的破坏，人工排查极慢。
+
+另外两块：
+- `tests/test_parallel.py` —— `parallel` 真并行。其中一条会**真的用 manim 渲一遍**
+  来验证"一条 play 里多个不同时长的动画，总时长等于 max"这个假设
+  （这是整个并行实现的地基，manim 升级改了就会红）。
+  想跳过这类渲染测试用 `MSB_SKIP_RENDER_TESTS=1`。
+- 测试还盯住了一个很隐蔽的坑：`.animate.scale(x).set_run_time(0.4)` 会被 manim
+  **静默忽略**（`set_run_time` 不在 `Mobject` 上），必须写成
+  `.animate(run_time=0.4).scale(x)`。
+
+**改了 `storyboard/dsl.py` 的 `_norm_*`、`schema.validate()` 或 `_anim*` 就请跑一遍。**
+
 ---
 
 ## 二、运行
@@ -310,6 +332,7 @@ D:\Manimatic\
 │   ├── examples/          # 分镜 JSON（free_*.json 是 DSL 写法；a1~e3 是 15 题测试集）
 │   ├── output/            # 自动生成的 .py / 分镜片段（_parts）/ mp4（videos）
 │   ├── eval/              # 测试题集 + 判对判错清单 + Bug 清单
+│   ├── tests/             # 回归测试（规范化幂等；改动 dsl/schema 后请跑 pytest）
 │   ├── generate.py        # 主入口（--spec 可打印给大模型看的 DSL 规格）
 │   ├── check_env.py       # 环境自检 + MathTex 实测渲染
 │   ├── run_all.bat        # 一键渲染 15 题测试集

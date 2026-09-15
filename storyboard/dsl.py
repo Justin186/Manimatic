@@ -875,19 +875,31 @@ def _norm_element(el, declared, trackers, where):
 
     # live 是所有元素通用的开关：true 则强制用 always_redraw 包裹，
     # 用于"跟着别的动态元素一起动"（例如始终套在动点外面的强调框）。
-    unknown = set(el.keys()) - set(spec) - {"id", "kind", "place", "live"}
+    # 兜底键（本模块自己产出的元信息）必须排除，否则第二遍会把它们当成
+    # "模型多写的未知参数"再记一次：`_dropped: []` → `_dropped: ["_dropped"]`。
+    # 这就是规范化不幂等的一个真实形态，2026-09-14 由 tests/ 抓出来。
+    unknown = set(el.keys()) - set(spec) - {"id", "kind", "place", "live", "_dropped"}
     out["live"] = bool(el.get("live", False))
     for k, v in el.items():
-        if k in ("id", "kind", "place", "live"):
+        if k in ("id", "kind", "place", "live", "_dropped"):
             continue
         if k not in spec:
             continue
         t, default, _ = spec[k]
-        out[k] = _norm_value(v, t, f"{where}.{k}", declared)
+        nv = _norm_value(v, t, f"{where}.{k}", declared)
+        # default is None 表示"这个参数是可选的"。可选参数**没写就不写进输出**：
+        # 一旦补成 {"x_range": None}，第二遍就会把"没写"读成"写了个 null"而报错
+        # （HANDOFF §8.6 的根因之一，tests/ 里有定点用例盯着）。
+        if nv is None and default is None:
+            continue
+        out[k] = nv
 
     for k in spec:
         if k not in out:
-            out[k] = spec[k][1]
+            d = spec[k][1]
+            if d is None:
+                continue                  # 可选参数没写：不补 None（理由见上）
+            out[k] = d
     # 必填检查必须看"原始 JSON 里有没有写"，不能看填充后的值：
     # plot 的 expr 默认值是 "x"，漏写会静默画出 y=x —— 又是一个"能跑但内容错了"。
     for k in REQUIRED.get(kind, []):
@@ -928,6 +940,11 @@ def _norm_element(el, declared, trackers, where):
 
 
 def _norm_value(v, t, where, declared):
+    # None 原样穿过（不在这里报错，也不转成别的形态）：
+    # "这个参数没写"是可选参数的合法状态，由调用方按 ELEMENT_SPEC 的默认值决定
+    # 是"补默认值"还是"就保持没写"。在这里统一报错会让所有可选参数都得写一遍。
+    if v is None:
+        return None
     if t == T_NUM:
         return _as_num_or_ref(v, where)
     if t == T_COORD:
@@ -995,6 +1012,31 @@ def _norm_place(place, where, declared):
         w = f"{where}[{i}]"
         if not isinstance(p, dict) or not p:
             raise DSLError(f"{w}: 每条 place 必须是非空对象")
+
+        # ---- ① 先认「已经展平过的 next_to」----
+        # `{"next_to":"id", "direction":..., "buff":...}` 正是本函数下面那段**自己**
+        # 展平产出的形态。规范化的输出必须能被自己重新读入，否则第二遍就会把它判成
+        # "一条 place 里有多个布局键"而报错 —— 也就是 f(f(x)) != f(x)（不幂等）。
+        # 2026-09-14 由 tests/test_normalize_idempotent.py 抓出，是 HANDOFF §8.6 那条：
+        # replace-scene 曾因此报"校验失败"，而同一份数据前一个闸刚说"通过"。
+        # ⚠️ 判据要求**必须带一个伴随键**，免得把模型写错的裸 `{"next_to":"ax"}` 也放过去 —
+        # 那种情况仍走下面的分支报错，由重试机制引导它写全。
+        if ("next_to" in p and isinstance(p["next_to"], str)
+                and set(p) <= {"next_to", "direction", "buff", "aligned"}
+                and ({"direction", "buff", "aligned"} & set(p))):
+            if p["next_to"] not in declared:
+                raise DSLError(f"{w}: 引用了未声明的元素 {p['next_to']!r}")
+            d = {
+                "next_to": p["next_to"],
+                "direction": str(p.get("direction", "down")).lower(),
+                "buff": float(p.get("buff", 0.4)),
+            }
+            al = str(p.get("aligned") or "").lower()
+            if al:
+                d["aligned"] = al
+            out.append(d)
+            continue
+
         # "buff" 是所有布局共用的修饰键，不算主键
         keys = [k for k in p if k != "buff"]
         if len(keys) != 1:
@@ -1017,12 +1059,17 @@ def _norm_place(place, where, declared):
                 raise DSLError(f"{w}: next_to 需要 {{{{of, direction, buff}}}}")
             if val["of"] not in declared:
                 raise DSLError(f"{w}: 引用了未声明的元素 {val['of']!r}")
-            out.append({
+            d = {
                 "next_to": val["of"],
                 "direction": str(val.get("direction", "down")).lower(),
                 "buff": float(val.get("buff", 0.4)),
-                "aligned": str(val.get("aligned", "")).lower() or None,
-            })
+            }
+            # aligned 为空时**不写这个键**（而不是写 null）：写 null 会让规范化产物里
+            # 带一个"值为 null 的可选键"，第二遍再读进来形态就对不上了 —— 同 §8.6 那类问题。
+            al = str(val.get("aligned") or "").lower()
+            if al:
+                d["aligned"] = al
+            out.append(d)
         elif key == "at_point":
             out.append({"at_point": _check_point(val, f"{w}.at_point", declared)})
         elif key == "shift":
@@ -1050,6 +1097,54 @@ def _norm_place(place, where, declared):
     return out
 
 
+def _flatten_parallel(subs, declared, trackers, where):
+    """
+    把 parallel 的子动作摊平成一个**可并行**的列表（2026-09-15）。
+
+    两条规则，都是为了让 `_Builder._parallel()` 能无歧义地把它合成**一条**
+    `self.play(...)`，同时保证「实际耗时 == `_est_action_time` 的估算」这条等式成立：
+
+    1. **嵌套 parallel 递归摊平**。`AnimationGroup(a, AnimationGroup(b, c))` 的实际
+       结束时刻是 `max(a, max(b, c))`，与完全摊平的 `max(a, b, c)` **恒等**，
+       所以摊平不改变语义；但摊平后估时函数不用再递归处理嵌套，少一层出错的可能。
+       （如果哪天改成嵌 AnimationGroup，估时也得跟着改，而那种"两处必须同时改"的地方
+         正是本项目最容易漏的一类。）
+    2. **多 target 的动作拆成多个单 target 副本**。`show: {target:[a,b]}` 会展开成
+       两条 `self.add(...)`，塞不进一条 `self.play`；拆开之后每个副本仍是原来的语义
+       （并行 add）。渲染端因此只需处理"1 个 target"这一种情况。
+
+    ⚠️ **刻意不做的一件事**：把"同一元素上的多个动作"合并成一条链式调用。
+    理由不是做不到，而是**不该并行** —— 对同一个 mobject 的两个操作天然有先后
+    （先放大再旋转 vs 先旋转再放大，结果不同），硬塞进同一条 play 里，谁先生效
+    取决于 manim 内部执行顺序。渲染端遇到同元素重复会**整段降级为顺序播放**，
+    那才是符合直觉的语义。这样渲染端也不必认识"链式动作"这种新形态。
+    """
+    flat = []
+    for s in subs:
+        if s.get("do") == "parallel":
+            flat.extend(_flatten_parallel(s.get("actions") or [], declared, trackers, where))
+            continue
+        targets = s.get("target") or []
+        if len(targets) > 1:
+            for t in targets:
+                cp = dict(s)
+                cp["target"] = [t]
+                flat.append(cp)
+        else:
+            flat.append(s)
+
+    # 断言：渲染端的可并行判据必须能接受这里产出的每一个动作（1 个 target）。
+    # 不做这一步的话，"校验层放行 / 渲染层降级"两边会悄悄漂移 —— 而漂移的症状是
+    # "写的是并行、跑出来是串行"，正是这次要修的毛病本身。
+    for s in flat:
+        if len(s.get("target") or []) > 1:
+            raise DSLError(
+                f"{where}: parallel 的子动作 {s.get('do')!r} 展开后仍有多个 target，"
+                "内部不一致（这是校验层的 bug）"
+            )
+    return flat
+
+
 def _norm_action(ac, declared, trackers, where):
     if not isinstance(ac, dict):
         raise DSLError(f"{where}: 动作必须是对象")
@@ -1073,6 +1168,13 @@ def _norm_action(ac, declared, trackers, where):
         if "target" not in ac:
             raise DSLError(f"{where}: {do} 需要 target")
         tgt = ac["target"]
+        # target 允许内联定义元素（随手造随手用）：
+        # 内联的元素第一遍就被转成 out["inline"] + out["target"]=[id]，而**它不在
+        # declared（那是 elements 数组的名单）里**。所以第二遍读回来必须认这个形态 ——
+        # 否则就会报"引用了未声明的元素 d1"，而那份数据正是规范化自己生成的（不幂等）。
+        # 2026-09-14 由 tests/ 抓出，属 HANDOFF §8.6 那一类"规范化产物喂回 raw 入口"。
+        inline_here = ac.get("inline")
+        inline_id = inline_here.get("id") if isinstance(inline_here, dict) else None
         # target 允许内联定义元素（随手造随手用）
         if isinstance(tgt, dict):
             tgt = _norm_element(tgt, declared, trackers, f"{where}.target")
@@ -1083,27 +1185,38 @@ def _norm_action(ac, declared, trackers, where):
             for t in tgt:
                 if not isinstance(t, str):
                     raise DSLError(f"{where}: target 数组里只能是 id 字符串")
-                if t not in declared:
+                if t not in declared and t != inline_id:
                     raise DSLError(f"{where}: 引用了未声明的元素 {t!r}")
                 out["target"].append(t)
         else:
-            if not isinstance(tgt, str) or tgt not in declared:
+            if not isinstance(tgt, str) or (tgt not in declared and tgt != inline_id):
                 raise DSLError(f"{where}: 引用了未声明的元素 {tgt!r}")
             out["target"] = [tgt]
+        # 已经规范化过的内联元素：原样带走（元素本身已在第一遍校验过）。
+        # 没有这一步，inline 就会在下一次规范化时被"drop"掉，内联定义的元素凭空消失。
+        if isinstance(inline_here, dict) and "inline" not in out:
+            out["inline"] = inline_here
+
+        out["target"] = list(out["target"])
 
     # 各动作的附加参数
     if do in ("transform", "replace"):
         if "into" not in ac:
             raise DSLError(f"{where}: {do} 需要 into")
         into = ac["into"]
+        inline_here = ac.get("inline_into")
+        inline_id = inline_here.get("id") if isinstance(inline_here, dict) else None
         if isinstance(into, dict):
             into = _norm_element(into, declared, trackers, f"{where}.into")
             out["inline_into"] = into
             out["into"] = into["id"]
         else:
-            if into not in declared:
+            # `into` 可能是第一遍从内联元素转出来的 id（它不在 declared 里），同上
+            if not isinstance(into, str) or (into not in declared and into != inline_id):
                 raise DSLError(f"{where}: into 引用了未声明的元素 {into!r}")
             out["into"] = into
+        if isinstance(inline_here, dict) and "inline_into" not in out:
+            out["inline_into"] = inline_here
 
     if do == "wait":
         out["time"] = float(ac.get("time", out.get("run_time", 0.5)))
@@ -1118,10 +1231,22 @@ def _norm_action(ac, declared, trackers, where):
         # 以前这里没有这段，actions 就被丢掉了；而 act() 与时长估算都读 ac["actions"]，
         # 于是 parallel 变成"写了却什么都没做"：不报错、不上屏、只吐一行注释 ——
         # 最典型的静默失败（2026-09-12 发现）。
-        out["actions"] = [
+        norm_subs = [
             _norm_action(s, declared, trackers, f"{where}.actions[{i}]")
             for i, s in enumerate(subs)
         ]
+        # 真并行（2026-09-15）：把子动作**摊平**成一个可并行的列表。
+        #
+        # 为什么必须摊平而不是嵌套进一个 AnimationGroup：
+        #   `_est_action_time()` 是给"软时长"补 wait 用的，它按 `max(子动作)` 估；
+        #   而 manim 对 AnimationGroup **不缩放**子动画时长（composition.py 里
+        #   `build_animations_with_timings` 用的是子动画**原始** run_time，没乘 rate_func）。
+        #   只要渲染端真的是「一条 self.play 带多个动画」，实际总时长就同等于
+        #   `max(子动作估时)` —— 估算与实际天然一致。嵌一层 AnimationGroup 会
+        #   让这条等式多一圈可能出现偏差的转译，而且估时函数也得跟着复杂化。
+        #   （顺带确认过：AnimationGroup 的 run_time 与 rate_func 只影响组内**相对**
+        #     时间映射，不会缩放子动画时长 —— 见 init_run_time / interpolate。）
+        out["actions"] = _flatten_parallel(norm_subs, declared, trackers, where)
 
     if do == "tracker_to":
         v = _as_num_or_ref(ac.get("to", 1.0), f"{where}.to")
@@ -1830,6 +1955,66 @@ class _Builder:
 
     # ---------- 时间线 ----------
 
+    # ---- parallel：真并行 ----
+    #
+    # 2026-09-15 之前这里是"把子动作顺序展开成多条 self.play(...)"—— 也就是
+    # **`parallel` 这个承诺从来没兑现过**：模型写"圆画出来的同时文字写出来"，
+    # 实际演的是"圆画完、再写文字"，总时长等于各子动作之和。契约型静默失效。
+    #
+    # 真并行的实现就一条：把子动作编译成**动画表达式**（而不是直接写行），
+    # 合成**一条** `self.play(a, b, ...)`，交给 manim 按共同时间轴同时跑。
+    #
+    # 读源码确认过的两条事实（不是猜的）：
+    #   · `Scene.get_run_time()`（manim/scene/scene.py）= `max(各动画 run_time)`
+    #   · `AnimationGroup.build_animations_with_timings()`
+    #     （manim/animation/composition.py）里子动画的 run_time 决定它自己的结束时刻
+    # 所以"同时开始、各自按时长结束、整段 = max"正是 manim 的默认行为，
+    # 不需要 AnimationGroup、也不该传外层 run_time（`_setup_animations()` 会把
+    # `self.play` 的 kwargs 挨个 setattr 到**每个**子动画上，会把子动作时长全部抹平）。
+    _PARALLEL_ANIM_ACTS = frozenset({
+        "create", "write", "fade_in", "fade_out", "grow", "draw_border",
+        "indicate", "circumscribe", "flash", "wiggle", "focus",
+        "shift", "move_to", "move_cells",
+        "scale", "rotate", "set_color", "set_opacity", "set_stroke", "stretch",
+    })
+    # show / remove / trace 不是 .animate 类动画，manim 不接受，只能降级
+    _PARALLEL_INSTANT_ACTS = frozenset({"show", "remove", "trace"})
+
+    def _parallel(self, ac):
+        subs = ac.get("actions") or []
+        # target 多于一个的动作（如 show/remove/trace）会展开成多条语句，塞不进一条
+        # self.play —— 由校验层的展平保证这里不会遇到，真遇到就整段降级（见下）。
+        # 同一个元素被两个子动作碰（含两次 shift）：整段顺序播放。硬塞进同一条 play
+        # 里谁先生效取决于 manim 内部顺序，合并成链式调用又会让估时和渲染色都变复杂 ——
+        # 而"对同一元素的两个操作有先后"本来就是更符合直觉的语义。
+        tgts = [t for s in subs for t in (s.get("target") or [])]
+        if (all(s.get("do") in self._PARALLEL_ANIM_ACTS and len(s.get("target") or []) == 1
+                for s in subs)
+                and len(tgts) == len(set(tgts))):
+            exprs = []
+            for sub in subs:
+                # 用 _anim_timed：把各子动作自己的 run_time 注入到**它的表达式内部**
+                # （为什么不拼在外面 / 不写在外层，见 _anim_timed 的 docstring）
+                exprs.append(self._anim_timed(sub["do"], f"{_V}{sub['target'][0]}", sub))
+            self.lines.append(f"        # >> 真并行：{len(exprs)} 条子动作合成一条 self.play")
+            self.lines.append("        self.play(" + ", ".join(exprs) + ")")
+            return
+
+        # ---- 降级：顺序播放，但**如实**写出"这段是顺序的" ----
+        # 能走到这里说明子动作里有 show/remove/trace，或有多个 target，
+        # 或同一个元素被两个子动作碰（见上面的判据）。
+        # 宁可顺序播（画面还是对的）也不能生成 manim 会报错的代码。
+        self.lines.append("        # >> 降级为顺序播放：含无法并行的子动作")
+        for i, sub in enumerate(subs):
+            # show / remove 是幂等的即时操作，重复执行没有副作用，直接丢掉
+            if i > 0 and sub.get("do") in ("show", "remove"):
+                continue
+            # trace 第二次会重复加一条 TracedPath —— 保留第一条（它本来就不吃并行）
+            if i > 0 and sub.get("do") == "trace":
+                continue
+            self.lines.append(f"        # >> 顺序子动作 > {sub.get('do', '?')}")
+            self.act(sub)
+
     def act(self, ac):
         do = ac["do"]
         if do == "wait":
@@ -1844,12 +2029,7 @@ class _Builder:
             )
             return
         if do == "parallel":
-            # 注意：这里是**顺序**展开成多条 self.play(...)，不是真并行
-            # （真并行要先把每条子动作编译成"动画表达式"而不是直接写行，属于较大的重构）。
-            # 语义上仍比之前好：以前 actions 在规范化阶段就被丢掉了，整段就是空转。
-            for sub in ac.get("actions", []):
-                self.lines.append(f"        # >> parallel > {sub.get('do', '?')}")
-                self.act(sub)
+            self._parallel(ac)
             return
 
         if "inline" in ac:
@@ -1928,6 +2108,7 @@ class _Builder:
         return ""
 
     def _anim(self, do, var, ac):
+        """构造动画表达式（**不带** run_time；时长由调用方决定怎么加）。"""
         if do == "create":
             return f"Create({var})"
         if do == "write":
@@ -1977,20 +2158,64 @@ class _Builder:
             return f"{var}.animate.stretch({_num(ac['factor'])}, dim={ac['dim']})"
         raise DSLError(f"动作 {do!r} 没有对应实现（spec 与实现不一致）")
 
+    def _anim_timed(self, do, var, ac):
+        """
+        `_anim()` + 把这个子动作自己的 run_time 加进去 —— **只有真并行需要它**。
+
+        为什么不能像普通路径那样把 `run_time=` 拼在 `self.play(...)` 的末尾：
+        `self.play(Create(x), run_time=2, Write(y))` 是 **Python 语法错误**
+        （位置参数跟在关键字参数之后）。第一版就是这么写的，被
+        `renderer._check_syntax()` 的 compile() 兜底拦下 —— 那道闸存在的意义正在于此。
+        而 `run_time` 又**不能**写在外层：manim 的 `_setup_animations()` 会把 play 的
+        kwargs 挨个 setattr 到**每个**子动画上，把各自的时长抹平。
+        所以只能逐个注入到各自表达式的内部。
+
+        两种形态注入方式**不一样**：
+          · 类构造器 `Create(x)`  → 在最后一个右括号前插关键字参数：`Create(x, run_time=2)`
+          · `.animate` 链        → 必须写成**调用形式**并在方法**之前**：
+                                   `x.animate(run_time=2).scale(1.5)`
+
+        ⚠️ `.animate` 那条实测踩过坑（2026-09-15）：想当然写成
+        `x.animate.scale(1.5).set_run_time(2)` —— **它会被静默忽略，时长仍是默认 1.0s**。
+        原因是 `set_run_time` 是 `Animation` 上的方法、**不在 Mobject 上**
+        （实测 `hasattr(Mobject, "set_run_time") == False`），于是
+        `_AnimationBuilder.__getattr__` 把它当成一个普通的目标方法转发到
+        `mobject.target` 上，然后……什么都不发生。既不报错也没有效果 ——
+        正是本项目最忌讳的静默失效，而症状会是"估时 0.4s、实际演 1.0s"的时长漂移。
+        三种写法实测：`animate(run_time=.4).scale()` → 0.40s ✓ ｜
+        `animate.scale().set_run_time(.4)` → 1.00s ✗ ｜ 不给 → 1.00s。
+        """
+        expr = self._anim(do, var, ac)
+        rt = ac.get("run_time")
+        if not rt:
+            # 不给就用 manim 自己的默认（通常 1.0s）。真并行下"每个子动作各自时长"
+            # 本来就得逐个写出来，这是拿回该能力的代价。
+            return expr
+        if ".animate." in expr:
+            return expr.replace(".animate.", f".animate(run_time={_num(rt)}).", 1)
+        assert expr.endswith(")"), expr
+        return f"{expr[:-1]}, run_time={_num(rt)})"
+
 
 def _est_action_time(ac):
     """
     估算一个动作真正占用的时长（供"软时长"补 wait 用）。
 
-    注意 parallel：_Builder.act() 目前是把子动作**顺序**编译成多条 self.play(...) 的，
-    所以这里按"求和"估才和实际一致。等哪天把 parallel 改成真并行（一条 self.play 里带
-    多个动画、取子动作 run_time 的 max），这里必须同步改成 max —— 两处是一对，
-    改一处不改另一处，分镜就会莫名提前结束或莫名拖一截。
+    ⚠️ parallel 必须与 `_Builder._parallel()` **保持一致**，这两处是一对：
+
+    | 实现 | 实际耗时 | 这里必须 |
+    |---|---|---|
+    | 顺序展开成多条 self.play（2026-09-15 之前） | 各子动作之和 | `sum` |
+    | 合成一条 self.play（现在，真并行） | 各子动作的 **max** | `max` |
+
+    改一处不改另一处，分镜就会莫名提前结束（估多了）或莫名拖一截（估少了）。
+    这也是 manim 自己的语义：`Scene.get_run_time()` 取的就是 max。
     """
     if ac["do"] == "wait":
         return float(ac["time"])
     if ac["do"] == "parallel":
-        return sum(_est_action_time(s) for s in ac.get("actions") or [])
+        # 空 actions 在规范化阶段已被拒，这里 max(..., default=0) 只是防御
+        return max((_est_action_time(s) for s in ac.get("actions") or []), default=0.0)
     rt = ac.get("run_time") or ACTION_SPEC[ac["do"]]["run_time"]
     return float(rt) if rt is not None else 0.0
 
