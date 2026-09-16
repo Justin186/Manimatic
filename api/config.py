@@ -36,8 +36,13 @@ def _env_bool(name, default):
 # output/ 是渲染管线的默认根目录，_parts/ 的增量缓存也在它下面。
 OUTPUT_DIR = os.path.abspath(_env_str("MSB_OUTPUT_DIR", os.path.join(ROOT, "output")))
 
-# 返回给前端的视频 URL 前缀。必须是**绝对地址**：
-# 前端拿到 url 直接塞进 <video src>，相对路径会打到 Next.js 那个端口（3000）而不是后端（8000）。
+# 返回给前端的视频 URL 前缀。
+#
+# ⚠️ 前端会把 {前缀}/media/... 之类**绝对地址**改写成同源地址再交给 Next 转发
+#    （web/src/lib/api.ts::mediaUrl，rewrites 在 web/next.config.ts）。
+#    所以这里写 localhost 是安全的：它只是"地址的写法"，不会被访问者的浏览器直接拿去请求 ——
+#    否则局域网里那个 localhost 会指访问者自己的机器，视频必然 404。
+#    如果将来换 CDN，把这里改成 CDN 域名即可，前端只认 pathname 是 /media/ 的地址、其余原样放行。
 PUBLIC_BASE_URL = _env_str("MSB_PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
 
 # 前端是另一个端口，SSE 的 fetch 是跨域请求 —— 默认放开，生产按需收紧。
@@ -46,6 +51,9 @@ CORS_ORIGINS = [s.strip() for s in _env_str("MSB_CORS_ORIGINS", "*").split(",") 
 # ---- 渲染参数（与 generate.py 的 CLI 默认值保持一致）----
 QUALITY = _env_str("MSB_QUALITY", "l")
 CN_FONT = _env_str("MSB_FONT", "STZhongsong")
+# 数字/字母单独一种字体。**不能靠中文字体自动 fallback**：华文中宋自带拉丁字形，
+# Pango 只对"当前字体缺字形"的字符去找后备字体，于是数字字母会一直是宋体的西文。
+LATIN_FONT = _env_str("MSB_LATIN_FONT", "Times New Roman")
 USE_LATEX = _env_bool("MSB_USE_LATEX", True)
 PREWARM = _env_bool("MSB_PREWARM", True)
 FAST = _env_bool("MSB_FAST", False)
@@ -134,6 +142,7 @@ def as_dict():
         "public_base_url": PUBLIC_BASE_URL,
         "quality": QUALITY,
         "cn_font": CN_FONT,
+        "latin_font": LATIN_FONT,
         "use_latex": USE_LATEX,
         "prewarm": PREWARM,
         "fast": FAST,

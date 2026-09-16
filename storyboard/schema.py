@@ -201,6 +201,10 @@ def validate(storyboard: dict, registry: dict) -> dict:
     }
 
     seen_ids = set()
+    # 上一个**DSL** 分镜的上下文，供下一个分镜的 carry（承接）校验用。
+    # v1 模板分镜没有元素表，承接无从谈起 —— 遇到它就把 prev 清掉，
+    # 免得下一镜拿着一份对不上的名单去承接。
+    prev = None
     for idx, sc in enumerate(scenes):
         if not isinstance(sc, dict):
             raise SchemaError(f"scene[{idx}]: 必须是对象")
@@ -215,7 +219,7 @@ def validate(storyboard: dict, registry: dict) -> dict:
         # 剩下的交给 dsl.validate_scene 报出精确错误（比如"有 elements 却没 timeline"）。
         if "elements" in sc or "timeline" in sc:
             try:
-                dsl_scene = dsl.validate_scene(sc, sid)
+                dsl_scene = dsl.validate_scene(sc, sid, prev=prev)
             except dsl.DSLError:
                 raise
             except Exception as e:
@@ -230,6 +234,10 @@ def validate(storyboard: dict, registry: dict) -> dict:
                 ) from e
             dsl_scene["id"] = sid
             dsl_scene["mode"] = "dsl"
+            prev = {
+                "elements": {el["id"]: el for el in dsl_scene["elements"]},
+                "on_screen": dsl.on_screen_at_end(dsl_scene),
+            }
             out["scenes"].append(dsl_scene)
             continue
 
@@ -383,5 +391,7 @@ def validate(storyboard: dict, registry: dict) -> dict:
             "params": params,
             "_dropped_keys": sorted(unknown),
         })
+        # v1 模板分镜没有元素表 —— 后面的分镜承接不到任何东西（理由见上面 prev 的注释）
+        prev = None
 
     return out

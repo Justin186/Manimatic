@@ -1,6 +1,7 @@
 .vscode/
 .codebuddy/
 output/
+media/
 __pycache__/
 
 # LLM 密钥与第三方工具导出的凭据（里面通常带 apiKey / providerKeys，绝不进 git）

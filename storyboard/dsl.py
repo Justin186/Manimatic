@@ -48,8 +48,26 @@
 
 import re
 
+from . import metrics
+
 # 变量前缀：避免元素 id 撞上 Python 关键字或 manim 的全局名
 _V = "_e_"
+
+
+def var_name(eid):
+    """
+    元素 id → 生成代码里的变量名。
+
+    公开出来是因为**渲染器也要拼这个名字**（分镜边界的清屏片段要按变量名排除承接元素），
+    两边各写一份 `"_e_" + id` 迟早会漂移。
+    """
+    return _V + eid
+
+
+# 构建期依赖：这些参数指向别的元素，构建时必须先生成对方（`_Builder.build()` 用的就是
+# 这一份）。carry 校验也读它 —— 承接了一个元素、却没承接它依赖的元素，
+# 边界清屏会把依赖清掉，画面就剩个"飘着的图"。
+BUILD_DEPS = ("axes", "curve", "of", "path")
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TRACKER_REF = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
@@ -160,6 +178,75 @@ def _has_cjk(s):
     return bool(_CJK_RE.search(str(s)))
 
 
+# ---- 中英混排：中文走 CN_FONT，数字/字母走 LATIN_FONT ------------------------
+#
+# 为什么必须显式切分，而不是只写 `font=CN_FONT` 让 Pango 自己 fallback：
+# CN_FONT（华文中宋）**自己就带拉丁字形**，Pango 只会在"当前字体没有这个字形"时
+# 才去找后备字体 —— 所以 font=CN_FONT 的 Text 里，数字和字母永远出不了新罗马体，
+# 只有宋体自带的西文（2026-09-16 用户实测反馈："Text 的数字和字母都不是新罗马体"）。
+#
+# 为什么用 MarkupText + <span font_family> 而不是"按中文/西文切几段 Text 再 VGroup 拼"：
+# 后者的每段字高、基线各不相同，arrange 只能按外框对齐，中英混排会忽高忽低；
+# MarkupText 交给 Pango 排同一行，基线天然一致。
+_LATIN_RUN = _re.compile(r"([\\u3000-\\u303f\\u4e00-\\u9fff\\uff00-\\uffef]+)")
+_LATIN_FONT_OK = None
+
+
+def _has_latin_font():
+    """
+    LATIN_FONT 是否真的注册在 Pango 里。查一次、缓存一次、只警告一次。
+
+    不查的后果是"静默换字体"：Pango 找不到指定的 family 就回退到它自己的默认字体，
+    画面照常渲染、一行报错都没有，但字已经不是要求的那个了
+    （check_env.py 讲中文字体时点名过这个坑）。
+    """
+    global _LATIN_FONT_OK
+    if _LATIN_FONT_OK is None:
+        try:
+            import manimpango
+            _LATIN_FONT_OK = LATIN_FONT in manimpango.list_fonts()
+        except Exception:
+            _LATIN_FONT_OK = True      # 查不了就别自作聪明降级
+        if not _LATIN_FONT_OK:
+            print("[WARN] 西文字体 %r 未注册到 Pango，数字/字母退回 %r"
+                  % (LATIN_FONT, CN_FONT))
+    return _LATIN_FONT_OK
+
+
+def _markup_escape(s):
+    """Pango 标记里的三个特殊字符。& 必须最先replace，否则会把 &lt; 二次转义。"""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _markup(s):
+    """把**非中文**的连续段包进 <span font_family="LATIN_FONT">。"""
+    latin = _has_latin_font()
+    out = []
+    for part in _LATIN_RUN.split(str(s)):
+        if not part:
+            continue
+        if latin and not _LATIN_RUN.fullmatch(part) and part.strip():
+            out.append('<span font_family="%s">%s</span>'
+                       % (LATIN_FONT, _markup_escape(part)))
+        else:
+            out.append(_markup_escape(part))
+    return "".join(out)
+
+
+def _text(s, font_size=48, **kw):
+    """
+    混排文本：中文用 CN_FONT，数字/字母用 LATIN_FONT（默认 Times New Roman）。
+
+    签名刻意和 Text 对齐（首参是字符串、其余走 **kw），因为它还要直接当
+    Axes 的 label_constructor 用 —— 刻度数字也是"Text 里的数字"，得一起管住。
+    """
+    try:
+        return MarkupText(_markup(s), font=CN_FONT, font_size=font_size, **kw)
+    except Exception:
+        # MarkupText 万一挂了也不能让整条片子出不来：退回纯 CN_FONT 的 Text
+        return Text(str(s), font=CN_FONT, font_size=font_size, **kw)
+
+
 _NUMBER_UNIT_BUFF = 0.14
 
 
@@ -176,7 +263,7 @@ def _number(value, num_decimal_places=2, unit="", font_size=32, color=ACCENT):
     if unit and _has_cjk(unit):
         num = DecimalNumber(value, num_decimal_places=num_decimal_places,
                             font_size=font_size, color=color)
-        lab = Text(unit.strip(), font=CN_FONT, font_size=font_size, color=color)
+        lab = _text(unit.strip(), font_size=font_size, color=color)
         grp = VGroup(num, lab)
         grp.arrange(RIGHT, buff=_NUMBER_UNIT_BUFF, center=False)
         return grp
@@ -212,20 +299,20 @@ def formula(s, **kw):
     """
     if not USE_LATEX:
         # 降级也不能把 LaTeX 源码糊在屏幕上：先清理成人能读的记号
-        return Text(_plain_tex(s), font=CN_FONT, **kw)
+        return _text(_plain_tex(s), **kw)
     if not _has_cjk(s):
         return MathTex(s, **kw)
     try:
         return Tex(f"${s}$", tex_template=TexTemplateLibrary.ctex, **kw)
     except Exception:
-        return Text(_plain_tex(s), font=CN_FONT, **kw)
+        return _text(_plain_tex(s), **kw)
 
 
 def _rich_line(s, font_size, **kw):
     """单行混排：用 $...$ 包 LaTeX，其余按中文渲染。"""
     parts = _re.split(r"\\$(.+?)\\$", s)
     if len(parts) == 1:
-        return Text(s, font=CN_FONT, font_size=font_size, **kw)
+        return _text(s, font_size=font_size, **kw)
     mobs = []
     for i, part in enumerate(parts):
         if not part:
@@ -234,7 +321,7 @@ def _rich_line(s, font_size, **kw):
             # LaTeX 字面比中文字面视觉高度小约 25%，不补偿会明显偏小
             mobs.append(formula(part, font_size=round(font_size * 1.3), **kw))
         else:
-            mobs.append(Text(part, font=CN_FONT, font_size=font_size, **kw))
+            mobs.append(_text(part, font_size=font_size, **kw))
     grp = VGroup(*mobs)
     grp.arrange(RIGHT, buff=0.12)
     return grp
@@ -254,13 +341,123 @@ def rich(s, **kw):
     return rows
 
 
-def _fit(m, max_w=12.4, max_h=6.6):
-    """防溢出护栏：超宽/超高就等比缩小。不做这步，长文本会静默飘出画面。"""
-    if m.width > max_w:
-        m.scale_to_fit_width(max_w)
-    if m.height > max_h:
-        m.scale_to_fit_height(max_h)
+# ---- 版面护栏：按"元素在画面里的实际位置"算可用空间 --------------------------
+# 左右各留 0.9111 → 居中元素可用宽 = 14.2222 - 2*0.9111 = 12.4
+# 上下各留 0.7    → 居中元素可用高 = 8.0    - 2*0.7    = 6.6
+# ⚠️ 与 storyboard/metrics.py 的 BUDGET_W / BUDGET_H 是同一组数（有测试盯着）
+_FRAME_MARGIN_X = 0.9111
+_FRAME_MARGIN_Y = 0.7
+_FIT_WARNED = set()
+
+
+def _fit(m, name="", max_w=None, max_h=None):
+    """
+    防溢出护栏：按元素**当前所在的位置**算可用空间，真放不下才等比缩小，并留一条告警。
+
+    为什么不是写死的 `max_w=12.4 / max_h=6.6`：那两个数只对**居中**的元素成立。
+    元素被 `place: [{"edge":"down","buff":1.0}]` 摆到偏下位置时，它下方只剩一点点空间，
+    还按 6.6 判就会"看代码没事、渲染出来下半截出画"。按位置算之后，居中元素的可用
+    空间恰好还是 12.4 × 6.6 —— 所以老分镜的观感零变化。
+
+    为什么真缩了要打 WARN：静默缩小正是"字怎么这么小"而日志里一个字都没有的来源。
+    校验层的估算本该先拦住它，走到了这里说明估算那次漏了，必须留下线索。
+    同一个元素只喊一次 —— `always_redraw` 的元素每帧都会调 _fit，不挡会刷屏。
+    """
+    half_w = config.frame_width / 2 - _FRAME_MARGIN_X
+    half_h = config.frame_height / 2 - _FRAME_MARGIN_Y
+    c = m.get_center()
+    avail_w = 2 * min(c[0] + half_w, half_w - c[0])
+    avail_h = 2 * min(c[1] + half_h, half_h - c[1])
+    if max_w is not None:
+        avail_w = min(avail_w, max_w)
+    if max_h is not None:
+        avail_h = min(avail_h, max_h)
+    k = max(m.width / max(avail_w, 1e-6), m.height / max(avail_h, 1e-6), 1.0)
+    if k > 1.0001:
+        m.scale(1.0 / k)
+        if name and name not in _FIT_WARNED:
+            _FIT_WARNED.add(name)
+            print("[WARN] 元素 %s 在当前位置放不下，已自动缩到 %.0f%%"
+                  " —— 校验层的尺寸估算没拦住它（见 metrics.py）" % (name, 100.0 / k))
     return m
+
+
+# 「淡出淡入」的两半：**严格先后，零重叠**。
+#
+# 时间轴（t 是整个过渡的进度，两半各自占一半时长）：
+#
+#     旧的  |████████|                      0 → 0.5 淡出完
+#     新的  |        |████████|            0.5 → 1 才淡入
+#
+# 为什么不是"两半同时淡"（那才是最标准的交叉溶解）：底部字幕是**居中**的，前后
+# 两句字数常常不同，重叠的那段时间里两句话叠在一起读不出字 —— 2026-09-16 逐帧看过，
+# 1.2s 的过渡里全程叠加糊 0.4s、错开到只重叠 20% 仍然看得出"淡出没淡完新的就来了"
+# （用户反馈原话）。所以这里彻底分开：旧的字消失之后，新的才开始出现。
+#
+# 两个函数在 t=0/1 端点分别取到 0 和 1，所以**收尾状态与"完整演一遍"完全一致**，
+# 不影响任何按最终形态做的判断（`_fit` / `cell_box` / keep 判断都在播放前算好）。
+# 每半段的时长 = run_time / 2，觉得切换太快就把 run_time 加大（默认 1.6）。
+def _xfade_out(t):
+    """旧的那一半：前半段淡尽（t ≥ 0.5 之后保持完全消失）。"""
+    return min(1.0, t / 0.5)
+
+
+def _xfade_in(t):
+    """新的那一半：后半段才淡入（t ≤ 0.5 期间保持完全不可见）。"""
+    return max(0.0, (t - 0.5) / 0.5)
+
+
+def _table_cell(m, cell_w=None, cell_h=None):
+    """
+    把单元格内容套进一个**不可见定尺框**：格子尺寸由参数决定，而不是被"这一列里
+    最长的那个内容"撑出来（更隐蔽的是 h_buff 默认 1.3 —— 每个格子凭空宽 1.3 个单位，
+    8 列光留白就吃掉 10.4，这才是"格子大小被固定死"的真正来源）。
+
+    框是透明的（描边/填充都不透明度 0），只负责提供包围盒 —— manim 的
+    `Table.get_cell()` 完全按"该行/列包围盒 + h_buff/2"推算格子边界，网格线取的也是
+    相邻列间隙的中点，两者与各列是否等宽无关。所以套框之后 cell_box / move_cells
+    仍然严丝合缝（2026-09-16 实测：套 0.9×0.7 的框后 cell(1,1) = 2.2×1.5，
+    正好是 0.9+1.3 与 0.7+0.8）。
+    """
+    w = float(cell_w) if cell_w else 0.0
+    h = float(cell_h) if cell_h else 0.0
+    if w <= 0 and h <= 0:
+        return m
+    box = Rectangle(width=max(w, m.width), height=max(h, m.height))
+    box.set_stroke(opacity=0)
+    box.set_fill(opacity=0)
+    return VGroup(box, m.move_to(box.get_center()))
+
+
+def _table(rows, cell_w=None, cell_h=None, pad_x=None, pad_y=None,
+           include_outer_lines=False):
+    """
+    建表格。**只有显式给了 cell_*/pad_* 才会绕这一圈**，否则走的是和以前一模一样的一行
+    `MobjectTable(...)` —— 生成代码逐字节不变（回归断言靠这条）。
+
+    cell_w / cell_h 是"格子最终尺寸"（含留白）：实际套的透明框尺寸 = cell_w - pad_x。
+    再取一次 max(目标, 内容)：校验层已经保证内容不会超过目标（超了会硬拒并回灌），
+    这里兜第二次只是为了"估算万一偏小也不裁掉内容"。留白是"内容到格线的距离"，
+    manim 的默认值 h_buff=1.3 / v_buff=0.8 偏大，想紧凑就写小一点。
+
+    ⚠️ 这两个 pad 参数由**生成器显式传进来**（`metrics.effective_pads()` 算好的），
+    这里的 None 分支只是"手工调用别崩"的兜底 —— 规则不在这里，别在这儿再判一次默认值。
+    """
+    kw = {}
+    if pad_x is not None:
+        kw["h_buff"] = float(pad_x)
+    if pad_y is not None:
+        kw["v_buff"] = float(pad_y)
+    if cell_w is None and cell_h is None:
+        return MobjectTable(rows, include_outer_lines=include_outer_lines, **kw)
+    px = float(pad_x) if pad_x is not None else 1.3
+    py = float(pad_y) if pad_y is not None else 0.8
+    sw = max((float(cell_w) - px) if cell_w else 0.0,
+             max((c.width for r in rows for c in r), default=0.0))
+    sh = max((float(cell_h) - py) if cell_h else 0.0,
+             max((c.height for r in rows for c in r), default=0.0))
+    wrapped = [[_table_cell(c, sw, sh) for c in r] for r in rows]
+    return MobjectTable(wrapped, include_outer_lines=include_outer_lines, **kw)
 
 
 def _legend(items, font_size=20, buff=0.16, color=WHITE):
@@ -531,11 +728,15 @@ ELEMENT_SPEC = {
         },
     },
     "table": {
-        "desc": "表格（可放公式）",
+        "desc": "表格（可放公式）。格子尺寸默认由内容撑出；想统一/紧凑用 cell_w/cell_h/pad_x/pad_y",
         "params": {
-            "rows": (T_TABLE, None, "二维数组，如 [[\"x\",\"0\",\"1\"],[\"y\",\"0\",\"1\"]]"),
+            "rows": (T_TABLE, None, "二维数组，如 [[\"x\",\"0\",\"1\"],[\"y\",\"0\",\"1\"]]（每行列数必须一致）"),
             "font_size": (T_INT, 24, "字号"),
             "outer_lines": (T_BOOL, True, "是否画外框"),
+            "cell_w": (T_NUM, None, "统一格子宽（含留白）：所有格子一样宽，不再被最长的内容单独撑宽"),
+            "cell_h": (T_NUM, None, "统一格子高（含留白）"),
+            "pad_x": (T_NUM, None, "格子左右留白，默认 1.3；想紧凑可写 0.4"),
+            "pad_y": (T_NUM, None, "格子上下留白，默认 0.8"),
         },
     },
     "cell_box": {
@@ -612,6 +813,16 @@ ELEMENT_SPEC = {
     },
 }
 
+# `replace` 的过渡效果白名单。默认是 crossfade（交叉淡化）而不是形变 —— 依据是观感：
+# 底部字幕这类"同一位置换内容"的场景里，ReplacementTransform 会把旧字**飞向新字的位置
+# 再变成新字**，字数一多一少就很别扭（2026-09-16 用户反馈："对这种底部字幕效果看起来
+# 不是很好"）。四种效果**对场景的影响完全一致**（旧对象下屏、新对象上屏），
+# 所以 `_Builder.act()` 里那句 `self.alias[a] = ...` 换绑对四种都一样成立。
+REPLACE_EFFECTS = ("crossfade", "slide", "write", "morph")
+REPLACE_EFFECT_DEFAULT = "crossfade"
+# slide 的位移量：旧的上移淡出、新的从下方顶上来（同一个 shift 就是"往上走一条"）
+REPLACE_SLIDE_SHIFT = 0.35
+
 ACTION_SPEC = {
     "create": {"desc": "Create：沿路径画出线条图形", "target": True, "run_time": 1.2},
     "write": {"desc": "Write：书写文字/公式", "target": True, "run_time": 1.0},
@@ -623,8 +834,12 @@ ACTION_SPEC = {
     "show": {"desc": "直接 add 上屏，无动画（动态元素用这个）", "target": True, "run_time": 0},
     "transform": {"desc": "Transform：把一个元素变形为另一个", "target": True, "run_time": 1.6,
                   "args": "into（目标元素 id，或内联一个元素对象）"},
-    "replace": {"desc": "ReplacementTransform：替换式变形", "target": True, "run_time": 1.6,
-                "args": "into（同上）"},
+    "replace": {"desc": "替换式换内容：旧的下屏、新的上屏，默认交叉淡化"
+                        "（同一位置换字用它，不要另 create 一个叠上去）",
+                "target": True, "run_time": 1.6,
+                "args": 'into（目标元素 id，或内联一个元素对象）+ effect'
+                        '（可选：crossfade 淡出淡入（默认）/ slide 上滑交叉 / '
+                        'write 逐字写出 / morph 形变）'},
     "indicate": {"desc": "Indicate：闪烁强调", "target": True, "run_time": 1.0, "args": "color"},
     "circumscribe": {"desc": "Circumscribe：画圈圈强调", "target": True, "run_time": 1.0,
                      "args": "color"},
@@ -637,7 +852,8 @@ ACTION_SPEC = {
               "args": "vector（必须写 vector=[dx,dy]，不是 point）"},
     "move_to": {"desc": "移动到指定点", "target": True, "run_time": 0.8,
                 "args": "point=[x,y] / {ref,x,y} / {of,anchor}（写 to= 也认，但请统一写 point）"},
-    "move_cells": {"desc": "把 cell_box 滑到另一组格子上（格子对齐，不会错位）",
+    "move_cells": {"desc": "把 cell_box 挪到另一组格子上并贴合它们（滑动窗口 / "
+                           "候选范围缩小都用它；位置和大小都由格子算，不会错位）",
                    "target": True, "run_time": 1.0,
                    "args": "of（表格 id）+ rows/cols（目标格号，行/列号从 1 开始）"},
     "scale": {"desc": "缩放", "target": True, "run_time": 0.7, "args": "factor"},
@@ -723,8 +939,11 @@ def _check_color(v, where):
         return v
     if HEX_COLOR.match(v):
         return v.upper()
+    # 不再写 "BLUE/RED/..." 这种带省略号的短名单：它和规格里那份全表对不上，
+    # 模型照着报错去猜反而更容易接着猜错。改成"是一个固定集合，去规格里抄"。
     raise DSLError(
-        f"{where}: 非法颜色 {v!r}。可用 Manim 常量（BLUE/RED/...）或 #RRGGBB"
+        f"{where}: 非法颜色 {v!r}。颜色只能用规格「硬性规则」里列出的那 {len(COLORS)} 个"
+        f"常量名之一，或 `#RRGGBB`"
     )
 
 
@@ -816,18 +1035,20 @@ def _check_range(v, where):
     return v
 
 
-def _check_cell_ids(v, where, max_n=6):
+def _check_cell_ids(v, where):
     """
     格号数组（cell_box 的 rows / cols）。行、列号都**从 1 开始**。
 
     为什么从 1 开始：manim 的 `Table.get_cell((r, c))` 就是 1-based。DSL 里换成
     0-based 的话，代码里每次取格都要 +1 换算一遍 —— 那是给自己造错位的机会，
     而错位是"画面能出、内容全错"的静默失败。索性跟 manim 对齐，只有一种基准。
+
+    ⚠️ 这里**不再有"最多 6 个"**（2026-09-16 删）：条数和"框会不会出界"毫无关系。
+    `[1,2,3,4,5,6,7,8]` 选一整行 8 格是完全正常的写法，以前会被硬拒。
+    真正要保证的是"格号落在表格范围内"（`_check_cell_refs._in_range` 管）。
     """
     if not isinstance(v, list) or not v:
         raise DSLError(f"{where}: 需要非空的格号数组，如 [1,2]（行/列号从 1 开始）")
-    if len(v) > max_n:
-        raise DSLError(f"{where}: 格号太多（{len(v)} 个），最多 {max_n} 个")
     out = []
     for i, x in enumerate(v):
         if isinstance(x, bool) or not isinstance(x, int):
@@ -853,10 +1074,84 @@ REQUIRED = {
 }
 
 
-def _norm_element(el, declared, trackers, where):
+def _carry_element(el, declared, trackers, where, prev):
+    """
+    承接形态：`{"id": "arr", "carry": true}` —— 这个元素**在上一分镜结束时就在屏上**，
+    本分镜不要重新画它，也不要在分镜边界把它清掉。
+
+    为什么只允许写 id、不写 kind/参数：内容由上一分镜的声明决定。若允许在这里重写一遍，
+    模型改了 rows 却因为"承接"而不重建 —— 改了不生效，正是本项目最忌讳的静默失效。
+    要改画面，请在本分镜的 timeline 里用动作（move_to / set_color / transform …）。
+
+    ⚠️ 但**展开形态必须也接受**：本函数会把 stub 展开成"上一镜的完整声明 + carry: true"，
+    而规范化产物是会被喂回校验入口的（replace-scene、`validate(validate(x))`）。
+    只认 stub 的话第二遍就会把规范化自己产出的东西判成"多写了参数"—— 不幂等，
+    与 HANDOFF §8.6 / §8.8 记录的是同一类问题。判据：带 `kind` 就是展开形态。
+    """
+    eid = el.get("id")
+    if not isinstance(eid, str) or not _IDENT.match(eid):
+        raise DSLError(
+            f"{where}: id 必须是字母/数字/下划线且不能数字开头，收到 {eid!r}"
+        )
+    if eid in declared:
+        raise DSLError(f"{where}: id {eid!r} 重复")
+    if not prev:
+        raise DSLError(
+            f"{where}: 第一个分镜不能写 carry —— 它没有「上一分镜」可以承接，"
+            f"元素必须在 elements 里完整声明"
+        )
+    prev_els = prev.get("elements") or {}
+    if eid not in prev_els:
+        raise DSLError(
+            f"{where}: carry 的 {eid!r} 在**上一个分镜**里没有声明过，承接不到。"
+            f"上一分镜声明了: {sorted(prev_els)}"
+        )
+    src = prev_els[eid]
+
+    if "kind" in el:
+        # 展开形态：内容必须和上一分镜**逐字段一致**。不一致就是"改了参数却不会生效"
+        # （承接元素在 reuse 模式下根本不会被重建），必须报出来而不是默默忽略。
+        mine = {k: v for k, v in el.items() if k != "carry"}
+        theirs = {k: v for k, v in src.items() if k != "carry"}
+        if mine != theirs:
+            diff = sorted(k for k in set(mine) | set(theirs)
+                          if mine.get(k) != theirs.get(k))
+            raise DSLError(
+                f"{where}: carry 元素 {eid!r} 的声明和上一分镜里的不一致"
+                f"（{diff}）—— 承接是「原样还在」，在这里重写它的参数不会生效。"
+                f"要改画面请在本分镜的 timeline 里用动作（move_to / set_color / transform）"
+            )
+    else:
+        extra = set(el) - {"id", "carry"}
+        if extra:
+            raise DSLError(
+                f"{where}: carry 元素只写 {{\"id\": ..., \"carry\": true}}，"
+                f"多写了 {sorted(extra)}。它的内容沿用上一分镜里的声明；"
+                f"要改画面请用动作（move_to / set_color / transform）"
+            )
+
+    live = prev.get("on_screen") or set()
+    if eid not in live:
+        raise DSLError(
+            f"{where}: carry 的 {eid!r} 在上一分镜结束时**并不在屏幕上**，"
+            f"承接过来会是一片空白。上一分镜结束时在屏上的是: {sorted(live)}"
+            f"（声明过但没被 create / write / fade_in / grow / draw_border / show "
+            f"动过的元素，不算在屏上）"
+        )
+    out = dict(src)
+    out["carry"] = True
+    declared.add(eid)
+    if out.get("kind") == "tracker":
+        trackers.add(eid)
+    return out
+
+
+def _norm_element(el, declared, trackers, where, prev=None):
     """校验并规范化一个元素定义，返回新 dict。"""
     if not isinstance(el, dict):
         raise DSLError(f"{where}: 元素必须是对象")
+    if el.get("carry"):
+        return _carry_element(el, declared, trackers, where, prev)
     eid = el.get("id")
     if not isinstance(eid, str) or not _IDENT.match(eid):
         raise DSLError(
@@ -955,7 +1250,11 @@ def _norm_value(v, t, where, declared):
             raise DSLError(f"{where}: 这里不能用追踪器")
         return int(f)
     if t == T_STR:
-        return str(v)[:400]
+        # 这个上限**不是排版判据**，只用来挡病态输入（几十万字的字符串会把 Text 对象和
+        # 渲染时间拖垮）。真正的"放不下"由 _check_layout_fits() 按内容估算来判。
+        # 上限抬到 2000 是为了让"500 字的正常长文"能走到估算器那里、拿到一条说清
+        # "超宽多少、怎么改"的报错，而不是在这里被静默砍掉一半内容。
+        return str(v)[:2000]
     if t == T_BOOL:
         if not isinstance(v, bool):
             raise DSLError(f"{where}: 需要 true/false")
@@ -979,17 +1278,28 @@ def _norm_value(v, t, where, declared):
             raise DSLError(f"{where}: 点太多（>12）")
         return [_check_point(p, f"{where}[{i}]", declared) for i, p in enumerate(v)]
     if t == T_TABLE:
+        # ⚠️ 这里原来有"最多 8 行 / 每行最多 8 列 / 单元格最多 80 字"三条硬上限，
+        # 2026-09-16 全部删掉：它们和"占多大地方"无关，真正该问的问题是
+        # "按这个字号画出来会不会出界"，那个由 _check_layout_fits() 用 metrics 估算回答。
+        # 而且 80 字截断是**静默改内容**（写 90 字会被悄悄砍掉 10 字），属于最坏的一类失效。
         if not isinstance(v, list) or not v:
             raise DSLError(f"{where}: rows 不能为空")
-        if len(v) > 8:
-            raise DSLError(f"{where}: 表格最多 8 行")
         rows = []
         for r in v:
             if not isinstance(r, list) or not r:
                 raise DSLError(f"{where}: 每行必须是数组")
-            if len(r) > 8:
-                raise DSLError(f"{where}: 每行最多 8 列")
-            rows.append([str(c)[:80] for c in r])
+            rows.append([str(c) for c in r])
+        # 各行长度必须一致。这条以前没有，于是"每行 3 个、某一行 4 个"会一路过校验、
+        # 直到 manim 的 `Table.__init__` 抛 `ValueError: Not all rows in table have the
+        # same length.` —— 那是非 DSLError，会穿透校验层变成用户的 500（HANDOFF §8.24 那类）。
+        widths = {len(r) for r in rows}
+        if len(widths) > 1:
+            bad = {len(r): i for i, r in enumerate(rows)}
+            raise DSLError(
+                f"{where}: 每行的列数必须一样，收到 {sorted(widths)}"
+                f"（第 {bad[min(widths)] + 1} 行有 {min(widths)} 列、"
+                f"第 {bad[max(widths)] + 1} 行有 {max(widths)} 列）"
+            )
         return rows
     if t == T_LIST:
         if not isinstance(v, list) or not v:
@@ -1218,6 +1528,20 @@ def _norm_action(ac, declared, trackers, where):
         if isinstance(inline_here, dict) and "inline_into" not in out:
             out["inline_into"] = inline_here
 
+    if do == "replace":
+        # effect 是**可选**参数，所以不写就不写进输出（写法与 ELEMENT_SPEC 的可选参数一致：
+        # 补一个 "effect": "crossfade" 会让第二遍把"没写"读成"写了"，破坏幂等）。
+        eff = ac.get("effect", REPLACE_EFFECT_DEFAULT)
+        if not isinstance(eff, str) or eff.lower() not in REPLACE_EFFECTS:
+            raise DSLError(
+                f"{where}.effect: 未知过渡效果 {eff!r}。"
+                f"可用: {' / '.join(REPLACE_EFFECTS)}"
+                f"（不写就是 {REPLACE_EFFECT_DEFAULT}：旧的淡出、新的淡入）"
+            )
+        eff = eff.lower()
+        if ac.get("effect") is not None:
+            out["effect"] = eff
+
     if do == "wait":
         out["time"] = float(ac.get("time", out.get("run_time", 0.5)))
         if not (0.05 <= out["time"] <= 20):
@@ -1401,6 +1725,69 @@ def _scan_point_exprs(obj):
     return out
 
 
+def _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs=None):
+    """
+    表达式里出现的标识符：不是 x、不是数学函数，就必须是已声明的 tracker。
+
+    不查这一遍，写错名字只会让 `_safe_eval` 抛异常并兜底成 0 —— 画面能出、内容全错，
+    这正是本项目从头到尾最怕的静默失败。
+
+    返回**错误字符串列表**而不是抛第一个：调用方会把它们和别的错误一起回灌，
+    让模型一轮改完（见 validate_scene 与 _format_errors）。
+
+    Args:
+        extra_exprs: `(where, expr)` 列表。给**没能通过规范化的元素**用 ——
+            那些元素进不了 norm_els，但它们表达式里的名字写错是独立的一处错误，
+            顺手扫一遍能少烧一轮重试（这些表达式只做只读扫描，不参与规范化）。
+    """
+    found = list(extra_exprs or [])
+    for el in norm_els:
+        for key in ("expr", "fx", "fy"):
+            if isinstance(el.get(key), str):
+                found.append((f"{el['id']}.{key}", el[key]))
+        found += [(f"{el['id']}", e) for e in _scan_point_exprs(el)]
+    for i, ac in enumerate(norm_acts):
+        found += [(f"timeline[{i}].point", e) for e in _scan_point_exprs(ac)]
+
+    errs = []
+    for where, expr in found:
+        for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr):
+            if name != "x" and name not in SAFE_NAMES and name not in trackers:
+                errs.append(
+                    f"{where_root}.{where}: 表达式 {expr!r} 里的 {name!r} 未定义"
+                    f"（只能是 x、数学函数，或某个 tracker 的 id）"
+                )
+    return errs
+
+
+# 一次回灌多少条错误：给得多，但不无限 —— 报错本身也要占上下文
+_MAX_ERRORS = 12
+_MAX_ERROR_CHARS = 1800
+
+
+def _format_errors(errors):
+    """
+    把收集到的多处问题拼成一条错误信息。
+
+    为什么要"一次全报"：原先的 `_norm_element` / `_norm_action` 是**遇到第一个错就抛**，
+    而 llm 那边的重试上限只有 4 次 —— 一份 4~6 分镜的 JSON 只要散着两三个错，
+    就会「报一个 → 模型改一个 → 又撞下一个」把次数耗光。模型本来能一次改完所有错，
+    是我们的反馈带宽把它逼死的（HANDOFF 里 D7 门要求"三次内 ≥95%"）。
+    """
+    lines = [f"校验未通过，共 {len(errors)} 处问题，请**一次性全部改正**后重新输出完整 JSON："]
+    used = shown = 0
+    for i, e in enumerate(errors[:_MAX_ERRORS], 1):
+        text = str(e)[:_MAX_ERROR_CHARS // 3]
+        if used + len(text) > _MAX_ERROR_CHARS:
+            break
+        lines.append(f"  {i}) {text}")
+        used += len(text)
+        shown = i
+    if shown < len(errors):
+        lines.append(f"  ...（还有 {len(errors) - shown} 处未列出，先修上面这些）")
+    return "\n".join(lines)
+
+
 def _check_cell_refs(where_root, norm_els, norm_acts):
     """
     格相关引用的**类型**校验（declared 只保证 id 存在，不看 kind，所以必须在这里补一遍）。
@@ -1453,16 +1840,18 @@ def _check_cell_refs(where_root, norm_els, norm_acts):
             # 没给 rows/cols 就沿用这个框自己声明的那组（等于原地重播一次）
             rows = ac.get("rows") or tgt["rows"]
             cols = ac.get("cols") or tgt["cols"]
-            if len(rows) != len(tgt["rows"]) or len(cols) != len(tgt["cols"]):
-                raise DSLError(
-                    f"{w}: 换一组格子时框的大小不能变"
-                    f"（框声明的是 {len(tgt['rows'])}×{len(tgt['cols'])}，"
-                    f"这次给的是 {len(rows)}×{len(cols)}）——大小一变框就和格子错位"
-                )
+            # 这里原来有一条"框的大小不能变（len(rows)/len(cols) 必须一致）"的检查，
+            # 2026-09-16 删掉 —— 它同时犯了两个错（详见 HANDOFF §8.33）：
+            #   · 拦不住该拦的：[1,8]（宽 8 格）→ [5,8]（宽 4 格）长度都是 2，照样放行，
+            #     而那时的代码只 move_to 不改大小 → 8 格宽的框被居中到 4 格中心，
+            #     整张表被横穿、右边还探出画面；
+            #   · 挡住了该做的：二分查找这类"候选范围逐轮减半"根本没法表达。
+            # 现在 move_cells 直接变形到"框住目标格子"的新框，大小随格子走，歪不了，
+            # 于是这条检查失去了存在理由。
             _in_range(rows, cols, tbl, w)
             # 补全后交给 codegen 直接用，避免在那里再判一次默认值
             ac["rows"], ac["cols"] = rows, cols
-        elif ac["do"] in ("move_to", "shift"):
+        elif ac["do"] in ("move_to", "shift", "scale", "stretch", "rotate"):
             for t in ac["target"]:
                 if kinds.get(t) == "cell_box":
                     raise DSLError(
@@ -1488,10 +1877,180 @@ def _check_cell_refs(where_root, norm_els, norm_acts):
                     )
 
 
-def validate_scene(scene, idx):
+# ==============================================================================
+# 版面出界判定（"会不会放不下"的唯一判据）
+# ==============================================================================
+def _layout_errors_for(el, where):
+    """
+    单个元素 → 出界问题列表（空 = 放得下）。
+
+    为什么把这件事从"数条数"搬到"估尺寸"：原来那几条硬上限（表格 8 行 8 列、
+    格号最多 6 个、单元格 80 字）与"占多大地方"完全无关 —— 8 列单字数字表宽 12.03
+    几乎顶满预算，8 列长公式表能到 30+，两者一样地"8 列"，却是一样的判罚。
+    换成估算之后，**只有真放不下才拒**，而且拒的时候能说清超了多少、怎么改。
+
+    估算器是保守上界（见 metrics 顶部），所以这里不会放过"其实放不下"的情况；
+    代价是极少数本来勉强能塞下的会被判回炉，那也比渲染时字被缩到看不清好。
+    """
+    kind = el["kind"]
+    out = []
+
+    def _too_big(w, h, hints, what):
+        if not metrics.fits(w, h):
+            out.append(metrics.overflow_msg(where, what, w, h, hints))
+
+    if kind == "text":
+        fs = el["font_size"]
+        w, h = metrics.est_block_size(el["content"], fs)
+        n_lines = len(str(el["content"]).split("\\n"))
+        hints = []
+        if w > metrics.BUDGET_W:
+            hints.append(f"把 font_size 从 {fs} 降到 {metrics.suggest_font_size(fs, w, h)}")
+            if n_lines == 1:
+                hints.append("用 `\\n` 拆成两行（每行短一半，宽度立刻减半）")
+            else:
+                hints.append(f"现在已有 {n_lines} 行，把每行再拆短一点")
+        if h > metrics.BUDGET_H:
+            hints.append(f"把 font_size 从 {fs} 降到 {metrics.suggest_font_size(fs, w, h)}"
+                         f"（或整段拆成两个分镜）")
+        _too_big(w, h, hints, "这段文字")
+        return out
+
+    if kind == "formula":
+        fs = el["font_size"]
+        w, h = metrics.est_formula_size(el["content"], fs)
+        hints = []
+        if w > metrics.BUDGET_W:
+            hints.append(f"把 font_size 从 {fs} 降到 {metrics.suggest_font_size(fs, w, h)}")
+            hints.append("拆成两行公式（`\\\\` 换行）或分成两个步骤")
+        if h > metrics.BUDGET_H:
+            hints.append("把公式拆成两个分镜，一屏只放一段推导")
+        _too_big(w, h, hints, "这个公式")
+        return out
+
+    if kind == "table":
+        fs = el["font_size"]
+        info = metrics.est_table_size(el["rows"], fs, el.get("cell_w"), el.get("cell_h"),
+                                      el.get("pad_x"), el.get("pad_y"))
+        # ① 给了 cell_w/cell_h 就必须真的装得下：装不下的话格子会被内容撑大，
+        #    "所有格子等宽"这个承诺就悄悄失效了（改了不生效 = 最忌讳的失效）。
+        if el.get("cell_w") is not None and info["need_cell_w"] > el["cell_w"] + 1e-9:
+            cw, r, c = info["widest"]
+            out.append(
+                f"{where}.cell_w: 定小了 —— 第 {r + 1} 行第 {c + 1} 列的内容估算宽 "
+                f"{cw:.2f}，加留白 {info['pad_x']:.2f} 至少要 "
+                f"{info['need_cell_w']:.2f} 才装得下，否则那一格会被内容撑大、"
+                f"格子就不等宽了。改法：把 cell_w 提到 {info['need_cell_w']:.2f} 以上，"
+                f"或缩短那一格的内容，或把 pad_x 调小"
+            )
+        if el.get("cell_h") is not None and info["need_cell_h"] > el["cell_h"] + 1e-9:
+            out.append(
+                f"{where}.cell_h: 定小了 —— 最高的内容加留白要 "
+                f"{info['need_cell_h']:.2f}，改法：把 cell_h 提到它以上或调小 pad_y"
+            )
+        hints = []
+        if info["w"] > metrics.BUDGET_W:
+            hints.append(f"去掉 {info['n_cols'] - metrics.suggest_count(info['n_cols'], info['w'])} 列"
+                         f"（现在 {info['n_cols']} 列）")
+            if info["pad_x"] > 0.35:
+                saved = (info["pad_x"] - 0.35) * info["n_cols"]
+                hints.append(f"把 pad_x 从 {info['pad_x']:.2f} 降到 0.35"
+                             f"（每格省 {info['pad_x'] - 0.35:.2f}，共省 {saved:.2f}）")
+            hints.append(f"把 font_size 从 {fs} 降到 "
+                         f"{metrics.suggest_font_size(fs, info['w'], info['h'])}")
+        if info["h"] > metrics.BUDGET_H:
+            hints.append(f"去掉 {info['n_rows'] - metrics.suggest_count(info['n_rows'], info['h'], metrics.BUDGET_H)} 行")
+            hints.append(f"把 font_size 从 {fs} 降到 "
+                         f"{metrics.suggest_font_size(fs, info['w'], info['h'])}")
+        _too_big(info["w"], info["h"], hints, f"这张 {info['n_rows']}×{info['n_cols']} 的表")
+        return out
+
+    if kind == "legend":
+        fs = el["font_size"]
+        ws = [metrics.est_text_w(str(it[1]), fs) + 0.4 + 0.12 for it in el["items"]]
+        hs = metrics.est_text_h("中", fs)
+        w = max(ws) if ws else 0.0
+        h = sum(hs for _ in el["items"]) + 0.16 * (len(el["items"]) - 1)
+        hints = [f"把 font_size 从 {fs} 降到 {metrics.suggest_font_size(fs, w, h)}"]
+        if len(el["items"]) > 1 and h > metrics.BUDGET_H:
+            hints.append(f"图例项从 {len(el['items'])} 条减到 4 条以内")
+        _too_big(w, h, hints, "这个图例")
+        return out
+
+    # 其余元素（axes/plot/dot/brace/cell_box/group/number…）要么尺寸由引擎决定、
+    # 要么本来就很小，估不了也不值得估 —— 它们由运行时的 _fit 兜底（真缩会打 WARN）。
+    return out
+
+
+def _check_layout_fits(where_root, norm_els):
+    """
+    版面出界判定：**返回**错误列表（不抛），好跟别的闸的错误一起回灌。
+
+    沿用与 `_check_cell_refs` 相同的策略：只在上游无错时跑（有上游错时估出来的
+    尺寸没有意义，只会产噪音）。
+    """
+    out = []
+    for i, el in enumerate(norm_els):
+        try:
+            out += _layout_errors_for(el, f"{where_root}.elements[{i}]")
+        except DSLError as e:
+            out.append(str(e))
+    return out
+
+
+# 动作对"在不在屏上"的影响。只列**确定**的：
+#   · transform / replace 之类一律当作"不改变在屏状态"—— 宁可漏报也不误报，
+#     误报会把正确的分镜拒掉，白烧一轮重试。
+_ON_SCREEN_ADD = frozenset({"create", "write", "fade_in", "grow", "draw_border", "show"})
+_ON_SCREEN_DROP = frozenset({"fade_out", "remove"})
+
+
+def _carry_deps(el):
+    """一个元素的构建期依赖（id 列表）。"""
+    out = [el[k] for k in BUILD_DEPS if isinstance(el.get(k), str)]
+    out += [it for it in (el.get("items") or []) if isinstance(it, str)]
+    return out
+
+
+def _walk_on_screen(acts, live):
+    """timeline（规范化的）→ 结束时还在屏上的集合。就地改 live。"""
+    for ac in acts or []:
+        do = ac.get("do")
+        if do == "clear_all":
+            live.clear()
+        elif do == "parallel":
+            _walk_on_screen(ac.get("actions") or [], live)
+        elif do in _ON_SCREEN_ADD:
+            live.update(ac.get("target") or [])
+        elif do in _ON_SCREEN_DROP:
+            live.difference_update(ac.get("target") or [])
+    return live
+
+
+def on_screen_at_end(norm_scene):
+    """
+    规范化的分镜 → 它**演完之后**还在屏上的元素 id 集合（下一分镜的 carry 校验要用）。
+
+    为什么必须模拟而不能只看"声明过"：声明了却从没被上屏动作动过的元素根本不在屏上
+    （这正是动态元素那个老坑）。承接一个"不在屏上"的元素，下一分镜就是一片空白 ——
+    而且不报错，属于最难查的一类静默失效。
+    """
+    live = {el["id"] for el in norm_scene["elements"] if el.get("carry")}
+    return _walk_on_screen(norm_scene["timeline"], live)
+
+
+def validate_scene(scene, idx, prev=None):
     """
     校验一个 v2 分镜（elements + timeline）。返回规范化 dict。
     所有引用完整性问题在这里拦掉 —— 引用了不存在的元素就是静默失败的温床。
+
+    ⚠️ 这里**不再"遇到第一个错就抛"**：elements / timeline / 表达式三处能独立发现的问题
+    会被收集起来一次报完。理由见 `_format_errors()` —— 重试次数有限，
+    一轮只报一个错等于把模型的 4 次机会浪费成 4 个错上。
+
+    Args:
+        prev: 上一个分镜的上下文 `{"elements": {id: 规范元素}, "on_screen": set(ids)}`。
+            `carry`（承接）要靠它判断"能不能承接"；不传 = 这是第一个分镜。
     """
     where_root = f"scene[{idx}]"
     if not isinstance(scene, dict):
@@ -1503,10 +2062,51 @@ def validate_scene(scene, idx):
     if len(elements) > 40:
         raise DSLError(f"{where_root}: 元素过多（{len(elements)}），上限 40")
 
+    # carry 元素先处理：它们在 t=0 就已经在屏上了，语义上"最先存在" ——
+    # 后面的元素引用它们不该报"未声明"，模型也不必纠结书写顺序。
+    # 没有 carry 时 order 原样不动（稳定排序），所以老分镜的产物逐字节不变。
+    order = list(range(len(elements)))
+    if any(isinstance(e, dict) and e.get("carry") for e in elements):
+        order.sort(key=lambda i: 0 if elements[i].get("carry") else 1)
+
     declared, trackers = set(), set()
+    errors = []
     norm_els = []
-    for i, el in enumerate(elements):
-        norm_els.append(_norm_element(el, declared, trackers, f"{where_root}.elements[{i}]"))
+    extra_exprs = []          # 没能通过规范化的元素，仍然做一次只读的表达式扫描
+    for i in order:
+        el = elements[i]
+        where = f"{where_root}.elements[{i}]"
+        try:
+            norm_els.append(_norm_element(el, declared, trackers, where, prev))
+        except DSLError as e:
+            errors.append(str(e))
+            # 尽力把这个 id 登记进 declared：否则后面凡是引用它的元素都会级联报
+            # "引用了未声明的元素"，把真正的问题淹掉（假错误比没有错误更坏）。
+            eid = el.get("id") if isinstance(el, dict) else None
+            if isinstance(eid, str) and _IDENT.match(eid):
+                declared.add(eid)
+                if el.get("kind") == "tracker":
+                    trackers.add(eid)
+            if isinstance(el, dict):
+                # 只写相对路径（不带 where_root）：_scan_expr_names 会自己补前缀，
+                # 写全了会拼成 "scene[1].scene[1].elements[1].expr" 这种重复前缀。
+                for key in ("expr", "fx", "fy"):
+                    if isinstance(el.get(key), str):
+                        extra_exprs.append((f"elements[{i}].{key}", el[key]))
+
+    # 承接的元素，它依赖的元素也必须一起承接。只承接 plot 不承接 axes 的话，
+    # 边界清屏会把 axes 淡掉、只剩一个飘着的图 —— 下面这条把它变成硬错误。
+    carried = {el["id"] for el in norm_els if el.get("carry")}
+    if carried:
+        missing = sorted({d for el in norm_els if el.get("carry")
+                          for d in _carry_deps(el) if d not in carried})
+        if missing:
+            errors.append(
+                f"{where_root}: carry 的元素依赖 {missing}，但它们没被一起承接 —— "
+                f"分镜边界会把它们清掉，画面只剩一个飘着的东西。"
+                + "请在 elements 里同样写上 "
+                + " / ".join('{"id": "%s", "carry": true}' % m for m in missing)
+            )
 
     timeline = scene.get("timeline")
     if not isinstance(timeline, list) or not timeline:
@@ -1516,29 +2116,29 @@ def validate_scene(scene, idx):
 
     norm_acts = []
     for i, ac in enumerate(timeline):
-        norm_acts.append(_norm_action(ac, declared, trackers, f"{where_root}.timeline[{i}]"))
+        try:
+            norm_acts.append(_norm_action(ac, declared, trackers,
+                                          f"{where_root}.timeline[{i}]"))
+        except DSLError as e:
+            errors.append(str(e))
 
-    _check_cell_refs(where_root, norm_els, norm_acts)
+    # 表达式标识符扫描是只读的、与上面互不影响，所以总是跟别的错误一起报
+    errors += _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs)
 
-    # 表达式里出现的标识符：不是 x、不是数学函数，就必须是已声明的 tracker。
-    # 不查这一遍，写错名字只会让 _safe_eval 抛异常并兜底成 0 —— 画面能出、内容全错，
-    # 这正是本项目从头到尾最怕的静默失败。
-    found = []
-    for el in norm_els:
-        for key in ("expr", "fx", "fy"):
-            if isinstance(el.get(key), str):
-                found.append((f"{el['id']}.{key}", el[key]))
-        found += [(f"{el['id']}", e) for e in _scan_point_exprs(el)]
-    for i, ac in enumerate(norm_acts):
-        found += [(f"timeline[{i}].point", e) for e in _scan_point_exprs(ac)]
+    # 这两道都看"规范化后的整体"。上游已经有错时跳过 —— 那种情况下它们给出的
+    # 只会是级联噪音，例如"of 指向的 table 本身没过校验"。
+    if not errors:
+        try:
+            _check_cell_refs(where_root, norm_els, norm_acts)
+        except DSLError as e:
+            errors.append(str(e))
+        else:
+            # 版面出界（表格/文本/公式/图例按内容估算）。放在 cell_refs 之后：
+            # 它对元素自身参数不敏感，不必跟"引用错了"这类问题抢注意力。
+            errors += _check_layout_fits(where_root, norm_els)
 
-    for where, expr in found:
-        for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr):
-            if name != "x" and name not in SAFE_NAMES and name not in trackers:
-                raise DSLError(
-                    f"{where_root}.{where}: 表达式 {expr!r} 里的 {name!r} 未定义"
-                    f"（只能是 x、数学函数，或某个 tracker 的 id）"
-                )
+    if errors:
+        raise DSLError(_format_errors(errors))
 
     duration = scene.get("duration")
     if duration is not None:
@@ -1586,6 +2186,33 @@ class _Builder:
         self.trackers = set()
         self.lines = []
         self.built = set()
+        self.alias = {}      # id -> "现在哪个 id 的变量才代表我"（只有 replace 会改它）
+
+    # ---------- 元素 id → 变量名 ----------
+
+    def _var(self, eid):
+        """
+        元素 id → **当前代表它**的那个变量名。
+
+        为什么需要这一层：`replace` 之后这个 id 所代表的物体已经换人了 ——
+        `ReplacementTransform(a, b)` 的语义是"把 a 从场景里删掉、把 b 加进去"。
+        之后若仍按 id 取回原来那个 `_e_a`，那个对象**已经不在场景里**，而 manim 的
+        `Scene.add_mobjects_from_animations()` 恰好有一条：
+
+            # Anything animated that's not already in the scene gets added to the scene
+            if mob is not None and mob not in curr_mobjects:
+                self.add(mob)
+
+        于是每一次 `replace` 都会先把**上一版**的文字重新加回屏上、再叠一层新的。
+        2026-09-16 实测（二分查找那题）：一个分镜里连做 6 次
+        `replace info into iN`，底部最后叠着 4 行不同的提示文字糊成一团。
+        （`transform` 不受影响：它的源对象一直留在场景里，原地变形。）
+        """
+        seen = set()
+        while eid in self.alias and eid not in seen:
+            seen.add(eid)
+            eid = self.alias[eid]
+        return f"{_V}{eid}"
 
     # ---------- 点坐标 → 代码 ----------
 
@@ -1604,9 +2231,9 @@ class _Builder:
         """点 → 代码。_check_point 已把形态规整好。"""
         if isinstance(pt, dict):
             if "ref" in pt:
-                return (f"{_V}{pt['ref']}.c2p({self._coord(pt.get('x', 0))}, "
+                return (f"{self._var(pt['ref'])}.c2p({self._coord(pt.get('x', 0))}, "
                         f"{self._coord(pt.get('y', 0))})")
-            return f"{_V}{pt['of']}.{ANCHORS[pt.get('anchor', 'center')]}"
+            return f"{self._var(pt['of'])}.{ANCHORS[pt.get('anchor', 'center')]}"
         return f"np.array([{self._coord(pt[0])}, {self._coord(pt[1])}, 0])"
 
     # ---------- 元素构建 ----------
@@ -1619,16 +2246,54 @@ class _Builder:
         if kind == "tracker":
             self.trackers.add(eid)
 
-        # 依赖先建：axes 必须早于 plot
-        for dep in ("axes", "curve", "of", "path"):
+        # ---- 承接元素（carry）：不重画、不加入场动画 ----
+        # 两种编排方式必须分开处理，否则都会出错：
+        #   reuse  —— 整个分镜集拼成**一个** Scene，所有分镜共用同一个 construct()
+        #             作用域。上一分镜建的 `_e_<id>` 变量还活着、对象也还在屏上，
+        #             所以这里**一行都不该生成**：再赋一次值只会让变量指向一个
+        #             不在屏上的新对象，后续 move_to 之类的动作就会打在空气里。
+        #   rebuild —— 拆分渲染（render_split），每个分镜是独立文件、独立 Scene，
+        #             变量不存在。只能重建一次，但**不走入场动画**，直接 add ——
+        #             观感上就是"接着上一镜继续演"。
+        if el.get("carry"):
+            if self.env.get("carry_mode", "rebuild") == "reuse":
+                self.built.add(eid)
+                return
+            self._build_carry(el)
+            self.built.add(eid)
+            return
+
+        self._build_deps(el)
+        self._emit_object(el)
+        self.built.add(eid)
+
+    def _build_deps(self, el):
+        """依赖先建：axes 必须早于 plot（`of` / `curve` / `path` / `items` 同理）。"""
+        for dep in BUILD_DEPS:
             if el.get(dep) in self.els:
                 self.build(self.els[el[dep]])
         for it in el.get("items", []) or []:
             if isinstance(it, str) and it in self.els:
                 self.build(self.els[it])
 
+    def _build_carry(self, el):
+        """
+        拆分渲染下的承接元素：重建一次并**立刻上屏**（不走入场动画）。
+
+        依赖必须先建：carry 校验已经保证依赖也被一起承接了，所以它们在本文件里同样是
+        carry；顺序上仍要先生成依赖的变量，否则 `win` 的构造会引用到还没赋值的
+        `_e_img` —— NameError，整个分镜渲不出来。
+        """
+        self._build_deps(el)
+        var = self._emit_object(el)
+        self.lines.append(f"        self.add({var})   # carry：承接上一分镜，直接上屏")
+
+    def _emit_object(self, el):
+        """按"动态性 / 适配规则"生成构造代码，返回变量名。"""
+        kind = el["kind"]
+        eid = el["id"]
         expr = self._construct(el)
-        var = f"{_V}{eid}"
+        var = var_name(eid)
         calls = self._place_calls(el.get("place"))
 
         # 含追踪器引用（或显式 live）→ 自动 always_redraw（机制 A）
@@ -1651,7 +2316,7 @@ class _Builder:
         elif dynamic:
             # 定位必须写进 lambda 内部：always_redraw 每帧重建对象，
             # 写在 lambda 外面的定位只会生效一次，元素随后会弹回原点。
-            inner = f"_fit({expr})" if fit else expr
+            inner = f"_fit({expr}, {eid!r})" if fit else expr
             self.lines.append(
                 f"        {var} = always_redraw(lambda: {inner}" + "".join(calls) + ")"
             )
@@ -1660,13 +2325,12 @@ class _Builder:
             for c in calls:
                 self.lines.append(f"        {var}{c}")
             if fit:
-                self.lines.append(f"        {var} = _fit({var})")
+                self.lines.append(f"        {var} = _fit({var}, {eid!r})")
 
         # tracker 必须 add 进场景才会被动画更新（Manim 的硬性要求）
         if kind == "tracker":
             self.lines.append(f"        self.add({var})")
-
-        self.built.add(eid)
+        return var
 
     def _place_calls(self, place):
         """布局 → 一串可链式追加的方法调用，如 ['.to_edge(UP, buff=0.8)']。"""
@@ -1678,7 +2342,7 @@ class _Builder:
                 out.append(f".to_corner({DIRECTIONS[p['corner']]}, buff={_num(p['buff'])})")
             elif "next_to" in p:
                 d = DIRECTIONS.get(p["direction"], "DOWN")
-                s = f".next_to({_V}{p['next_to']}, {d}, buff={_num(p['buff'])}"
+                s = f".next_to({self._var(p['next_to'])}, {d}, buff={_num(p['buff'])}"
                 if p.get("aligned"):
                     s += f", aligned_edge={p['aligned'].upper()}"
                 out.append(s + ")")
@@ -1739,7 +2403,9 @@ class _Builder:
         if self.env.get("fast") or not self.env.get("use_latex", True):
             style = "text"
         if style == "text":
-            return '{"color": GREY_B, "include_numbers": True, "label_constructor": Text}'
+            # label_constructor 用 _text 而不是 Text：刻度数字同样是"Text 里的数字"，
+            # 得跟着走 LATIN_FONT，否则坐标轴上就会出现两种西文字体。
+            return '{"color": GREY_B, "include_numbers": True, "label_constructor": _text}'
         return '{"color": GREY_B, "include_numbers": True}'
 
     def _mk_axes(self, el):
@@ -1867,8 +2533,22 @@ class _Builder:
             "[" + ", ".join(f'rich(r"""{_esc(c)}""", font_size={el["font_size"]})' for c in r) + "]"
             for r in el["rows"]
         )
-        return (f'MobjectTable([{rows}], '
-                f'include_outer_lines={"True" if el["outer_lines"] else "False"})')
+        outer = "True" if el["outer_lines"] else "False"
+        # 不给新参数时**生成的代码逐字节不变**（回归断言靠这条）：连 h_buff/v_buff
+        # 都不显式传 —— 显式传"和默认值一样"的数也会改字节。
+        keys = ("cell_w", "cell_h", "pad_x", "pad_y")
+        if all(el.get(k) is None for k in keys):
+            return f'MobjectTable([{rows}], include_outer_lines={outer})'
+        # ⚠️ 留白必须在这里算好再显式传下去：`effective_pads()` 是"给了 cell_w 就用紧凑
+        # 留白"这条规则的**唯一实现**，校验层（metrics.est_table_size）用的是同一个函数。
+        # 若让运行时自己判默认值，两边就有了两份规则 —— 迟早漂移成"校验说放得下、
+        # 渲染出来是另一个尺寸"。
+        px, py = metrics.effective_pads(el.get("cell_w"), el.get("cell_h"),
+                                        el.get("pad_x"), el.get("pad_y"))
+        opts = [f"{k}={_num(el[k])}" for k in ("cell_w", "cell_h") if el.get(k) is not None]
+        opts += [f"pad_x={_num(px)}", f"pad_y={_num(py)}"]
+        opts.append(f"include_outer_lines={outer}")
+        return f'_table([{rows}], ' + ", ".join(opts) + ")"
 
     def _mk_cell_box(self, el):
         # 注意：build() 先把依赖（of 指向的 table）建好、定位、_fit 完，才轮到这一步，
@@ -1947,7 +2627,7 @@ class _Builder:
         return f'ValueTracker({_num(el["value"])})'
 
     def _mk_group(self, el):
-        items = ", ".join(f"{_V}{i}" for i in el["items"] if isinstance(i, str))
+        items = ", ".join(self._var(i) for i in el["items"] if isinstance(i, str))
         d = DIRECTIONS.get(str(el["direction"]).lower(), "DOWN")
         al = str(el.get("aligned", "left")).upper()
         return (f'VGroup({items}).arrange({d}, aligned_edge={al}, '
@@ -1995,7 +2675,7 @@ class _Builder:
             for sub in subs:
                 # 用 _anim_timed：把各子动作自己的 run_time 注入到**它的表达式内部**
                 # （为什么不拼在外面 / 不写在外层，见 _anim_timed 的 docstring）
-                exprs.append(self._anim_timed(sub["do"], f"{_V}{sub['target'][0]}", sub))
+                exprs.append(self._anim_timed(sub["do"], self._var(sub["target"][0]), sub))
             self.lines.append(f"        # >> 真并行：{len(exprs)} 条子动作合成一条 self.play")
             self.lines.append("        self.play(" + ", ".join(exprs) + ")")
             return
@@ -2045,7 +2725,8 @@ class _Builder:
         lr_s = f", lag_ratio={_num(lr)}" if lr is not None else ""
 
         def v(i):
-            return f"{_V}{i}"
+            # 必须过 _var：被 replace 过的 id 现在挂在另一个变量上（见 _var 的说明）
+            return self._var(i)
 
         if do == "show":
             for t in ac["target"]:
@@ -2076,7 +2757,36 @@ class _Builder:
             return
         if do == "replace":
             a, b = ac["target"][0], ac["into"]
-            self.lines.append(f"        self.play(ReplacementTransform({v(a)}, {v(b)}){rt_s})")
+            eff = ac.get("effect", REPLACE_EFFECT_DEFAULT)
+            va, vb = v(a), v(b)
+            if eff == "morph":
+                # 旧行为：形变，旧字飞向新字的位置再变成新字。字幕类内容别用它。
+                play = f"ReplacementTransform({va}, {vb})"
+            elif eff == "write":
+                # 旧的先淡出、新的逐字写出。
+                play = f"FadeOut({va}), Write({vb})"
+            elif eff == "slide":
+                # 旧的向上淡出、新的从下方顶上来（同一个 shift 方向才是"往上换一条"）。
+                shift = f"UP * {_num(REPLACE_SLIDE_SHIFT)}"
+                play = f"FadeOut({va}, shift={shift}), FadeIn({vb}, shift={shift})"
+            else:                                   # crossfade（默认）
+                play = (f"FadeOut({va}, rate_func=_xfade_out), "
+                        f"FadeIn({vb}, rate_func=_xfade_in)")
+            # ⚠️ 四种效果合在一条 `self.play(...)` 里是安全的，依据是 manim 的两条源码事实
+            # （2026-09-16 核对，不是猜的）：
+            #   · `Animation._setup_scene()` 只对 **introducer** 调 `scene.add` —— FadeIn/Write
+            #     都是 introducer，新对象会在**淡入状态**下进场景（begin() → interpolate(0)
+            #     把它设成 starting_mobject，也就是那个 opacity=0 的副本），不会先整整一帧不透明地闪一下；
+            #   · `Scene.add_mobjects_from_animations()` 对 introducer 直接跳过，所以也不会
+            #     在 play 开头被提前加上屏。
+            #   · FadeOut 是 remover，结束时把旧对象 `scene.remove` 掉。
+            # 也就是说四种效果的**对象身份结果完全一致**：旧的离场、新的在场 —— 所以下面
+            # 那句换绑对四种都成立，不需要分支。
+            self.lines.append(f"        self.play({play}{rt_s})")
+            # 替换完成之后，id `a` 这个"槽位"里装的就是 b 那个物体了 —— 必须换绑，
+            # 否则后续引用 `a` 的动作会打到一个已经被移出场景的旧对象上，
+            # 而 manim 会"把被动画却不在场景里的对象重新加回场景"，把旧内容叠回来。
+            self.alias[a] = self.alias.get(b, b)
             return
         if do == "move_along":
             a = ac["target"][0]
@@ -2139,9 +2849,22 @@ class _Builder:
         if do == "move_to":
             return f"{var}.animate.move_to({self._point_code(ac['point'])})"
         if do == "move_cells":
-            # 目标位置由目标格子算出来（validate 阶段已保证 rows/cols 齐全且大小一致）
-            return (f"{var}.animate.move_to(_cells_center({_V}{ac['of']}, "
-                    f"{ac['rows']}, {ac['cols']}))")
+            # 位置**和大小**都由目标格子算出来：直接变形到"框住这组格子"的那个新框。
+            #
+            # 为什么不是 `.animate.move_to(_cells_center(...))`：move_to 只挪不改大小，
+            # 框还是声明时的那个宽度。跨度一变就必然歪 —— 2026-09-16 实测：`win`
+            # 声明 cols=[1,8]（整张表宽），后面挪到 cols=[8]（只剩最后一格），
+            # 结果一个 8 格宽的蓝框被居中到第 8 格上，右边探出画面、左边横穿整张表。
+            # 变形到 `_cell_box(...)` 就两种情况都对：同宽就是纯滑动（卷积核那种），
+            # 改宽就是跟着格子重新贴合（二分查找候选范围逐轮减半那种）—— 不需要分支。
+            box = self.els.get(ac["target"][0]) or {}
+            return (
+                f"Transform({var}, _cell_box({self._var(ac['of'])}, "
+                f"{ac.get('rows') or box.get('rows')}, {ac.get('cols') or box.get('cols')}, "
+                f"color={_color(box.get('color', 'RED'))}, "
+                f"stroke_width={_num(box.get('stroke_width', 3.5))}, "
+                f"buff={_num(box.get('buff', 0.04))}))"
+            )
         if do == "scale":
             return f"{var}.animate.scale({_num(ac['factor'])})"
         if do == "rotate":
@@ -2247,6 +2970,17 @@ def build_scene(scene: dict, env: dict) -> str:
 # 给 LLM 看的说明（可直接塞进 system prompt）
 # ==============================================================================
 
+def _wrap_names(names, per_line=10):
+    """
+    把名称集合排成几行。
+
+    为什么分行而不是拼成一整行：颜色有 70+ 个，挤成一行时模型很容易"读漏一半"，
+    分行后它整段照抄的成功率高得多（同 §8.10：规格里的关键取值要让模型能一眼抄完）。
+    """
+    items = sorted(names)
+    return ["、".join(items[i:i + per_line]) for i in range(0, len(items), per_line)]
+
+
 def describe(include_place=True) -> str:
     """把元素库与动作表渲染成一份紧凑的规格说明 —— 喂给 LLM 用，永不手写第二份。"""
     out = ["# 分镜 DSL 规格（严格按此输出 JSON）", ""]
@@ -2255,6 +2989,34 @@ def describe(include_place=True) -> str:
     out.append('{"id":1, "elements":[...], "timeline":[...], "duration":6}')
     out.append("```")
     out.append("elements = 画面上有哪些东西；timeline = 它们按什么顺序出场/变化。")
+    out.append("")
+    out.append("`duration` 是这一镜的**目标秒数**（4~12），它是「软」的：")
+    out.append("- 算式 = timeline 里每个动作的耗时相加（parallel 段按其中**最长**的那个算）"
+               "，省略 run_time 时就用下面动作表里给的默认值；")
+    out.append("- 这个和**小于** duration → 自动补一段停顿，节奏不会赶；")
+    out.append("- 这个和**大于** duration → 不报错，但视频会比声明的长，所以别把动作堆太满。")
+    out.append("算这道加法时要带上默认 run_time —— 例如 `create`(1.2) + `wait`(0.6) "
+               "对应 duration 1.8，不是 0.6。")
+    out.append("")
+
+    out.append("## 跨分镜延续：carry（承接）")
+    out.append("**默认每个分镜都从空白画面开始**：分镜边界会把上一镜的东西全部淡出。"
+               "所以同一个东西在下一镜里只能**重新画一遍** —— 而重画在观感上等于"
+               "「从头再来」，讲连贯过程（数组一直在、指针一步步挪、迭代逐步收敛）时很别扭。")
+    out.append("要让一个东西跨分镜留着，在**后续分镜**的 elements 里这样写：")
+    out.append("```")
+    out.append('{ "id": "arr", "carry": true }')
+    out.append("```")
+    out.append("意思：`arr` 在上一分镜结束时就在屏上，本分镜**不要重画它、也不要清掉它**。"
+               "之后可以照常用动作动它（`move_cells` / `move_to` / `set_color` `indicate`…）。")
+    out.append("三条硬性规则：")
+    out.append("1. 只写 `id` 和 `carry`，**不能**再写 kind / 参数 —— 内容沿用上一分镜的声明。"
+               "要改画面请在 timeline 里用动作，靠重写参数是改不动的。")
+    out.append("2. 上一分镜结束时它必须**真的在屏上**：被 create / write / fade_in / grow / "
+               "draw_border / show 上过屏，且之后没被 fade_out / remove / clear_all 清掉。"
+               "（声明了却从没被动作点过的元素不算在屏上。)")
+    out.append("3. 它依赖的元素也要一起 carry（plot 的 `axes`、`cell_box` 的 `of`、"
+               "`group` 的 `items`）—— 否则依赖会被分镜边界清掉，画面只剩一个飘着的东西。")
     out.append("")
 
     out.append("## 元素类型（kind）")
@@ -2292,8 +3054,20 @@ def describe(include_place=True) -> str:
     out.append("")
     out.append("target 可以是元素 id、id 数组（并行播放），或直接内联一个元素对象。")
     out.append("⚠️ 附加参数的名字是**写死的**，按上面括号里写的来：move_to 用 `point`、"
-               "shift 用 `vector`、tracker_to 用 `to`、move_cells 用 `of`+`rows`/`cols`。"
+               "shift 用 `vector`、tracker_to 用 `to`、move_cells 用 `of`+`rows`/`cols`、"
+               "replace 用 `into`+`effect`。"
                "名字写错（或漏写）会直接被拒绝重做。")
+    out.append("")
+    out.append("## 同一位置换内容：用 replace（不要另 create 一个叠上去）")
+    out.append("底部字幕/说明这类「位置不变、内容换掉」的地方，用 `replace`，"
+               "它会把旧的**下屏**、新的**上屏**；另 create 一个新元素会与旧的叠在一起。"
+               "不写 `effect` 就是 `crossfade`（旧的淡出、新的淡入），另有 "
+               "`slide`（上滑交叉）/ `write`（逐字写出）/ `morph`（形变，适合图形变形）：")
+    out.append("```")
+    out.append('{"do":"replace","target":"info","into":{"id":"i2","kind":"text",'
+               '"content":"下一句提示"},"effect":"slide","run_time":1.2}')
+    out.append("```")
+    out.append(metrics.budget_line())
     out.append("")
 
     out.append("## 动态效果（重点）")
@@ -2306,8 +3080,10 @@ def describe(include_place=True) -> str:
     out.append("6. 实时显示数值用 `number` 元素，`\"value\":\"2*t\"` 会随 tracker 刷新；"
                "`\"unit\"` 是显示在数字右边的单位后缀，写中文（如 `\" 块\"`）没问题")
     out.append("")
-    out.append("含 tracker 引用（或 live）的元素会被渲染成 always_redraw 对象：")
-    out.append("**它们不会自动上屏，要用 `{\"do\":\"show\",\"target\":\"...\"}` 显式 add。**")
+    # 刻意不写引擎那侧的词汇（always_redraw / add 之类）：红线 1 明确要求模型
+    # "别把 Manim 的名字搬过来"，规格自己就不该先把它们摆出来。
+    out.append("含 tracker 引用（或 live）的元素是**每帧重算**的对象：")
+    out.append("**它们不会自动上屏，必须用 `{\"do\":\"show\",\"target\":\"...\"}` 显式显示。**")
     out.append("")
     out.append("## 网格与滑动窗口（卷积 / 池化 / 棋盘格 / 矩阵）")
     out.append("讲这类内容：格子用 `table`（数字天然落在格子里，不要用 text 拼多行数字），")
@@ -2318,8 +3094,14 @@ def describe(include_place=True) -> str:
     out.append('{"do":"move_cells","target":"win","of":"img","rows":[1,2],"cols":[2,3],"run_time":1}')
     out.append("```")
     out.append("行号/列号**从 1 开始**（左上角是第 1 行第 1 列）。")
+    out.append("`rows`/`cols` 换了跨度也可以：框会跟着重新贴合新格子。所以"
+               "「候选范围一轮轮变小」（二分查找那种）直接写目标格号即可，"
+               "不需要重建元素。")
+    out.append("格子尺寸默认由内容撑出来（一个长数字会把整列撑宽）。想统一/紧凑："
+               "`table` 加 `\"cell_w\":1.2, \"cell_h\":0.9` 让所有格子一样大，"
+               "`\"pad_x\":0.4` 调内容到格线的留白（默认 1.3 偏大）。")
     out.append("⚠️ 不要用 `rect` + `move_to` 自己估坐标去框格子：表格格子的尺寸是内容撑出来的，")
-    out.append("估出来的框一定会歪（校验层也会直接拒绝 cell_box 上的 move_to/shift）。")
+    out.append("估出来的框一定会歪（校验层也会直接拒绝 cell_box 上的 move_to/shift/scale）。")
     out.append("")
     out.append("## 组合动画")
     out.append("- **parallel**：并行执行多个子动作，每个可有独立 run_time。")
@@ -2329,8 +3111,14 @@ def describe(include_place=True) -> str:
     out.append("")
     out.append("## 硬性规则")
     out.append("- formula/content 里的 LaTeX 用 `\\frac` 等命令；中文说明用 text 的 `$...$` 混排")
-    out.append("- 颜色只能用 Manim 常量（BLUE/RED/GREEN/YELLOW/TEAL/PURPLE/ORANGE/PINK/GOLD/"
-               "WHITE/GREY/PRIMARY/ACCENT...）或 `#RRGGBB`")
     out.append("- 元素必须先声明（在 elements 里）才能被引用；引用不存在的 id 会直接报错")
-    out.append("- 表达式只能用 x、数字、运算符和数学函数（sin/cos/exp/log/sqrt/abs/min/max...）")
+    # ⚠️ 颜色与函数是**封闭白名单**（校验层会硬拒白名单外的写法），所以必须**列全**。
+    # 原先是 `BLUE/RED/.../PRIMARY` 这种带省略号的写法 —— 用省略号描述一个封闭集合，
+    # 模型只能靠直觉补（写出 LIGHT_BLUE / DARK_RED 这类不存在的名字）然后白丢一次重试。
+    # 同 §8.10 的教训：规格里"只列名字不给全"的地方，模型一定会猜错。
+    out.append("- **颜色只能用下面这些**（本项目的主题色是 PRIMARY / SECONDARY / ACCENT），"
+               "或 `#RRGGBB`：")
+    out += ["  " + ln for ln in _wrap_names(COLORS)]
+    out.append("- **表达式里只能用 x、数字、运算符和下面这些函数/常量**（以及已声明的 tracker 名）：")
+    out += ["  " + ln for ln in _wrap_names(SAFE_NAMES)]
     return "\n".join(out)

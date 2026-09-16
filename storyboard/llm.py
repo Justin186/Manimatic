@@ -8,7 +8,7 @@ LLM 接入层：把「一道数学题」变成一份**已经通过校验的**分
 决策 1 的底线：大模型只输出受 Schema 约束的 JSON，**一个字符的 Manim 代码都不写**。
 所以本模块做三件事，一件都不多：
 
-    build_prompt()      把 dsl.describe() 的规格 + 红线规则拼成 system prompt
+    build_system_prompt()  把 dsl.describe() 的规格 + 红线规则拼成 system prompt
     chat()              调一次 OpenAI 兼容的 /chat/completions
     generate_storyboard()  调 LLM → 解析 JSON → 过 schema/dsl 校验 → 不过就带着
                         错误信息回灌重试，直到通过或次数用尽
@@ -33,6 +33,7 @@ requirements.txt 只有 manim + numpy。为了少一个依赖（以及少一类"
 没有流式、没有 function call 的需求，SDK 带来的主要是便利而非能力。
 """
 
+import http.client
 import json
 import os
 import re
@@ -428,7 +429,7 @@ def _http_post_json(url, headers, payload, timeout):
         raise LLMError(f"接口返回的不是 JSON（前 500 字符）：\n{body[:500]}")
 
 
-def chat(messages, cfg, json_mode=False, purpose="chat"):
+def chat(messages, cfg, json_mode=False, purpose="chat", seen=None):
     """
     调一次 chat/completions，返回模型的文本回复。
 
@@ -503,19 +504,38 @@ def chat(messages, cfg, json_mode=False, purpose="chat"):
         raise
 
     try:
-        content = resp["choices"][0]["message"]["content"]
+        choice = resp["choices"][0]
+        content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError):
         raise LLMError(f"接口返回结构不认识：\n{json.dumps(resp, ensure_ascii=False)[:600]}")
+    # `finish_reason` 是判断"回复是不是被 max_tokens 砍断"的**唯一权威信号**。
+    # 抓它但不用它 = 白抓：截断会伪装成"JSON 解析失败"或"返回空内容"，
+    # 排查方向直接被带到语法错误上去（HANDOFF §8.11 就踩过这个坑）。
+    fr = str(choice.get("finish_reason") or "")
+    if seen is not None:
+        seen["finish_reason"] = fr
+        seen["usage"] = resp.get("usage")
+    if fr == "length":
+        # 必须喊出来：截断会把错因伪装成"JSON 解析失败"/"返回空内容"，
+        # 排查方向直接被带到语法错误上去（HANDOFF §8.11 的原始踩坑）。流式那条路同理。
+        print("      [WARN] 回复被 max_tokens 截断（finish_reason=length）——"
+              " 模型的思考先吃掉了大部分 token 预算，正文是残的", flush=True)
     if isinstance(content, list):
         # 少数厂商把 content 返回成分段数组
         content = "".join(p.get("text", "") for p in content if isinstance(p, dict))
     if not content or not str(content).strip():
-        raise LLMError("模型返回了空内容（可能是 max_tokens 太小，或被内容策略拦了）")
+        raise LLMError(
+            "模型返回了空内容"
+            + ("（**被 max_tokens 截断**：思考先吃光了 token 预算，正文一个字都没写。"
+               "调大 max_tokens，或换思考更短的模型）" if fr == "length" else
+               "（可能是 max_tokens 太小，或被内容策略拦了）")
+        )
 
     text = str(content)
     llm_log.record(purpose=purpose, model=cfg["model"], base_url=cfg["base_url"],
                    key=key, ok=True, seconds=time.time() - t0, reply=text,
-                   usage=resp.get("usage"), messages=messages, json_mode=json_mode)
+                   usage=resp.get("usage"), messages=messages, json_mode=json_mode,
+                   finish_reason=fr, max_tokens=cfg.get("max_tokens") or 0)
     return text
 
 
@@ -553,6 +573,9 @@ def _iter_sse_stream(resp, seen=None):
     `seen`（可选 dict）会被就地填上：
         usage          末包里的 usage（DeepSeek 不带 stream_options 也会给）
         finish_reason  结束原因
+        reasoning_chars / content_chars
+                       两路各自收到多少**字符**。流被上游掐断时，这是唯一能回答
+                       "它到底走到哪一步了"的数字（HANDOFF §8.35）。
 
     ⚠️ 实测（2026-09-12，DeepSeek）：撞到 `[DONE]` 之后**仍可能再来带 usage 的收尾包**，
     所以不能一见 [DONE] 就收工，必须把流读完，否则会莫名丢掉 token 统计。
@@ -581,11 +604,15 @@ def _iter_sse_stream(resp, seen=None):
         for key in _REASONING_KEYS:
             v = delta.get(key)
             if v:
+                if seen is not None:
+                    seen["reasoning_chars"] = seen.get("reasoning_chars", 0) + len(str(v))
                 yield "reasoning", str(v)
         piece = delta.get("content")
         if isinstance(piece, list):          # 少数厂商把 content 分片返回
             piece = "".join(p.get("text", "") for p in piece if isinstance(p, dict))
         if piece:
+            if seen is not None:
+                seen["content_chars"] = seen.get("content_chars", 0) + len(str(piece))
             yield "content", str(piece)
 
 
@@ -608,6 +635,40 @@ def _iter_replay_text(text, chunk=64):
         yield text[i:i + chunk]
 
 
+def _stream_break_message(err, timeout, seen):
+    """
+    流式读取中断（读超时 / 连接被切断）时的报错文案。
+
+    为什么值得单独写一段（HANDOFF §8.35）：这条失败的原形是
+    `TimeoutError: The read operation timed out` —— 它既不是 `LLMError`、也不会进留档，
+    于是一路冒到 `/api/chat` 的兜底分支变成一句「服务端异常」：**一次挂了五分钟的调用
+    什么都没留下**。而它和"输出被截断"其实是同一件事的两种收尾方式，
+    只有把"收到多少思考 / 多少正文"摆出来才分得清。
+    """
+    r_chars = int((seen or {}).get("reasoning_chars") or 0)
+    c_chars = int((seen or {}).get("content_chars") or 0)
+    lines = [
+        f"流式读取中断：{type(err).__name__}: {err}",
+        f"  {int(timeout)} 秒没收到任何新数据（配置里的 timeout），"
+        f"这一条流上共收到：思考 {r_chars} 字 / 正文 {c_chars} 字。",
+    ]
+    if r_chars and not c_chars:
+        lines += [
+            "  思考吐了一大堆、正文一个字都没有 —— 这不是我们的流式坏了，"
+            "而是**思考把 token 预算烧穿**之后上游没有按约定收尾"
+            "（正常命中上限应当是 finish_reason=length + [DONE]，见 HANDOFF §8.11 / §8.30），"
+            "于是连接挂着不关，我们只能等到读超时。",
+            "  对策：把该模型档案的 max_tokens 调大只能买回「更晚才失败」，"
+            "根治得靠收紧思考（prompt 里已加这条硬要求）。",
+        ]
+    else:
+        lines.append("  常见原因：中转站/网关断掉了这条连接（上游 5xx、被限流、NAT 超时），"
+                     "或本机网络抖动 —— 直接重试即可。")
+    lines.append("  ⚠️ 把 llm.local.json 里的 timeout 调大不会让它继续吐字，"
+                 "只会让你等更久才看到失败。")
+    return "\n".join(lines)
+
+
 def _http_post_json_stream(url, headers, payload, timeout, seen=None):
     """
     流式 POST，逐块 yield `(kind, text)` —— kind 是 "reasoning" 或 "content"。
@@ -621,6 +682,10 @@ def _http_post_json_stream(url, headers, payload, timeout, seen=None):
     for k, v in headers.items():
         req.add_header(k, v)
     req.add_header("Accept", "text/event-stream")
+    # 调用方没给 seen 也要自建一个：断流时的报错文案靠它说清"走到哪一步了"，
+    # 而"没传 seen"和"这次没收到东西"在报错里必须分得开（HANDOFF §8.35）。
+    if seen is None:
+        seen = {}
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
@@ -645,10 +710,19 @@ def _http_post_json_stream(url, headers, payload, timeout, seen=None):
     except TimeoutError:
         raise LLMError(f"LLM 接口超时（>{timeout}s）\n{url}")
     with resp:
-        yield from _iter_sse_stream(resp, seen)
+        try:
+            yield from _iter_sse_stream(resp, seen)
+        except (OSError, http.client.HTTPException) as e:
+            # ⚠️ 读到一半断流 / 读超时**必须在这里就地包成 LLMError**。
+            # 不包的话它以原形冒上去：上层（chat_stream / stream_storyboard / 路由）
+            # 全都是 `except LLMError`，一个都接不住，最后落在 pipeline 的兜底分支里
+            # 变成「服务端异常：TimeoutError」——不留档、没有收到多少思考，
+            # 也分不清它和"被截断"的区别（HANDOFF §8.35）。
+            raise LLMError(_stream_break_message(e, timeout, seen)) from e
 
 
-def chat_stream(messages, cfg, json_mode=False, purpose="chat", on_reasoning=None):
+def chat_stream(messages, cfg, json_mode=False, purpose="chat", on_reasoning=None,
+                seen=None):
     """
     流式调一次 chat/completions，逐个 yield **正文**文本增量。json_mode 语义同 chat()。
 
@@ -698,7 +772,10 @@ def chat_stream(messages, cfg, json_mode=False, purpose="chat", on_reasoning=Non
 
     headers = {**(cfg.get("headers") or {}), **_auth_headers(cfg)}
     t0 = time.time()
-    seen = {}
+    # 调用方可以传一个 dict 进来收 `finish_reason` / `usage`（同 chat() 的 seen）。
+    # 缺省自建一个：老调用方一个字都不用改。
+    if seen is None:
+        seen = {}
     pieces = []
     try:
         for kind, piece in _http_post_json_stream(endpoint(cfg["base_url"]), headers,
@@ -711,15 +788,27 @@ def chat_stream(messages, cfg, json_mode=False, purpose="chat", on_reasoning=Non
             pieces.append(piece)
             yield piece
     except LLMError as e:
+        # 断流时把**已经收到的正文**一起落盘：否则"它到底写到哪一步了"只能靠猜，
+        # 而半份 JSON 恰恰是判断"是语法写错还是被掐断"的关键（HANDOFF §8.35）。
+        # 不会污染回放：lookup() / last_reply() 都只看 ok=True 的记录。
         llm_log.record(purpose=purpose, model=cfg["model"], base_url=cfg["base_url"],
                        key=key, ok=False, seconds=time.time() - t0, error=str(e),
-                       messages=messages, json_mode=json_mode, streamed=True)
+                       reply="".join(pieces), messages=messages, json_mode=json_mode,
+                       streamed=True, finish_reason=str(seen.get("finish_reason") or ""),
+                       max_tokens=cfg.get("max_tokens") or 0)
         raise
 
+    fr = str(seen.get("finish_reason") or "")
+    if fr == "length":
+        # 截断是**必须喊出来**的：否则它会伪装成"JSON 解析失败"，
+        # 把排查方向从"预算不够"带偏到"语法写错"上（HANDOFF §8.11 的原始踩坑）。
+        print(f"      [WARN] 回复被 max_tokens 截断（finish_reason=length）——"
+              f" 模型的思考先吃掉了大部分 token 预算，正文是残的", flush=True)
     llm_log.record(purpose=purpose, model=cfg["model"], base_url=cfg["base_url"],
                    key=key, ok=True, seconds=time.time() - t0, reply="".join(pieces),
                    usage=seen.get("usage"), messages=messages, json_mode=json_mode,
-                   streamed=True)
+                   streamed=True, finish_reason=fr,
+                   max_tokens=cfg.get("max_tokens") or 0)
 
 
 class BriefTap:
@@ -952,24 +1041,30 @@ def parse_json_object(text):
 # Prompt
 # ==============================================================================
 
-# few-shot 示例。用 DSL 写法最短的一个完整故事板 ——
-# 目的是让模型"照着格式抄"，而不是靠文字描述去猜 envelope 长什么样。
+# few-shot 示例。目的是让模型"照着格式抄"，而不是靠文字描述去猜 envelope 长什么样。
 #
 # ⚠️ 键的顺序是**故意**的：brief 必须第一个出现。
 # 前端接 SSE 时按流式字符增量解析（api/ 里那层），brief 在最前面意味着
 # 1~2 秒就有字可显示；把 title 放前面也一样不行 —— 它太短，解析不出"已经能显示"的信号。
+#
+# ⚠️ 为什么是**三个**示例而不是一个（2026-09-16）：
+# 原先只有下面这一个，它演示的恰好是"tracker + 切线"这一条路，而 `describe()` 里
+# 花了大量篇幅讲的 table / cell_box / move_cells / parallel / intent=none 一个都没示范。
+# 模型对"只描述过、没看过"的东西只能靠直觉猜 —— 这正是 §8.10 那次 `{"center"}`
+# 踩过的坑（规格里只给键名 → 模型按 JS 直觉写出非法 JSON）。
+# 示例是最强的那份规格，覆盖不到的部分等于没写。
 _EXAMPLE = '''{
   "brief": "导数描述的是函数「变化有多快」。对 y = x^2 来说，它在 x 处的导数就是曲线在那一点切线的斜率，代入求导公式得 y' = 2x，所以切线会随着点一起转动。",
   "intent": "propose",
   "outline": [
-    { "id": 1, "title": "动点与切线", "durationSec": 9, "summary": "点沿抛物线滑动，切线实时跟随，右上角显示斜率" }
+    { "id": 1, "title": "动点与切线", "durationSec": 9.3, "summary": "点沿抛物线滑动，切线实时跟随，右上角显示斜率" }
   ],
   "title": "导数就是切线斜率",
-  "problem_type": "calculus",
+  "problem_type": "derivative_geometry",
   "scenes": [
     {
       "id": 1,
-      "duration": 9.0,
+      "duration": 9.3,
       "elements": [
         { "id": "ax", "kind": "axes", "x_range": [-1.5, 3.5, 1], "y_range": [-1, 8, 1] },
         { "id": "t",  "kind": "tracker", "value": -1.0 },
@@ -991,6 +1086,132 @@ _EXAMPLE = '''{
   ]
 }'''
 
+# 示例 2：几何题。**故意全程不用 `axes`** —— 这是对"所有题都上坐标系"这个模板的直接
+# 反例，而几何恰恰是模板化最容易被看出来的题型（一道证明题里冒出坐标系就会很突兀）。
+# 它示范的是：只画图形本身 + 用动作（创建/淡出）让"割补"这个推理过程看得见。
+_EXAMPLE_GEOMETRY = '''{
+  "brief": "求斜着的三角形面积，可以用「割补法」：先用一个矩形把它框住，再把多出来的那块直角三角形减掉。补形之后各边都是水平或竖直的，面积可以直接数出来。",
+  "intent": "propose",
+  "outline": [
+    { "id": 1, "title": "先看这个三角形", "durationSec": 5.1, "summary": "画出斜着的直角三角形，标出顶点和直角" },
+    { "id": 2, "title": "补成矩形再割掉", "durationSec": 6.0, "summary": "用矩形框住它，淡出多出来的那一块，剩下就是三角形" }
+  ],
+  "title": "用割补法求三角形面积",
+  "problem_type": "geometry",
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 5.1,
+      "elements": [
+        { "id": "tri", "kind": "polygon", "points": [[-1.2,-1.4],[2.4,-1.4],[-1.2,1.0]],
+          "color": "PRIMARY", "stroke_width": 4, "fill_opacity": 0.18 },
+        { "id": "ra", "kind": "angle", "a": [2.4,-1.4], "vertex": [-1.2,-1.4], "c": [-1.2,1.0],
+          "right": true, "color": "WHITE" },
+        { "id": "la", "kind": "text", "content": "A", "font_size": 28, "place": [{ "at_point": [-1.6,-1.75] }] },
+        { "id": "lb", "kind": "text", "content": "B", "font_size": 28, "place": [{ "at_point": [2.75,-1.75] }] },
+        { "id": "lc", "kind": "text", "content": "C", "font_size": 28, "place": [{ "at_point": [-1.6,1.35] }] },
+        { "id": "cap", "kind": "text", "content": "底 3、高 2 的直角三角形",
+          "place": [{ "edge": "up", "buff": 0.6 }] }
+      ],
+      "timeline": [
+        { "do": "create", "target": "tri", "run_time": 1.5 },
+        { "do": "create", "target": "ra", "run_time": 0.6 },
+        { "do": "fade_in", "target": ["la","lb","lc"], "run_time": 0.8 },
+        { "do": "write", "target": "cap", "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+    {
+      "id": 2,
+      "duration": 6.0,
+      "elements": [
+        { "id": "box", "kind": "polygon", "points": [[-1.2,-1.4],[2.4,-1.4],[2.4,1.0],[-1.2,1.0]],
+          "color": "GREY", "stroke_width": 3 },
+        { "id": "tri", "kind": "polygon", "points": [[-1.2,-1.4],[2.4,-1.4],[-1.2,1.0]],
+          "color": "PRIMARY", "stroke_width": 4, "fill_opacity": 0.18 },
+        { "id": "extra", "kind": "polygon", "points": [[-1.2,1.0],[2.4,1.0],[2.4,-1.4]],
+          "color": "YELLOW", "fill_opacity": 0.25 },
+        { "id": "eq", "kind": "text", "content": "$S$ = 底 × 高 ÷ 2 = 4 × 3 ÷ 2 = 6",
+          "font_size": 32, "color": "ACCENT", "place": [{ "corner": "dr", "buff": 1.0 }] }
+      ],
+      "timeline": [
+        { "do": "create", "target": "box", "run_time": 1.0 },
+        { "do": "draw_border", "target": "tri", "run_time": 1.2 },
+        { "do": "fade_in", "target": "extra", "run_time": 0.8 },
+        { "do": "fade_out", "target": "extra", "run_time": 0.8 },
+        { "do": "write", "target": "eq", "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    }
+  ]
+}'''
+
+# 示例 3：网格类内容（table + cell_box + move_cells）+ **跨分镜承接（carry）**。
+# 三个作用合一：
+#   1. `{"center": true}` 这个写法的正面示例（原先只有"别写错"的警告，没有"写对了长什么样"）；
+#   2. duration 的算法在这里可见：1.5 + 0 + 1.0 + 0.5 + 2.0 + 1.0 = 6.0；
+#   3. 示例 2 之后第二镜**不重画网格**——只写 `{"id":"img","carry":true}`。
+#      "连贯过程别重画"这条规范光靠嘴说是压不住的（模型对示例的模仿远强于对规则的遵守），
+#      所以必须有一个能照抄的正面例子。
+_EXAMPLE_GRID = '''{
+  "brief": "卷积就是拿一个小窗口在输入网格上滑动：每停一处，把窗口盖住的数字和权重逐个相乘再相加，就得到输出上的一个数。窗口每次右移一格，滑完整张图就得到整张输出。",
+  "intent": "propose",
+  "outline": [
+    { "id": 1, "title": "窗口在网格上滑动", "durationSec": 6.0, "summary": "画出 3×3 输入，用红框标出左上角的 2×2 窗口，再把它滑到右下" },
+    { "id": 2, "title": "网格留在原地接着算", "durationSec": 3.2, "summary": "网格和红框都从上一镜延续下来，直接写出这一格算出的数" }
+  ],
+  "title": "卷积窗口是怎么滑动的",
+  "problem_type": "convolution",
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 6.0,
+      "elements": [
+        { "id": "img", "kind": "table", "font_size": 28,
+          "rows": [["1","0","1"],["0","1","0"],["1","1","0"]],
+          "place": [{ "center": true }] },
+        { "id": "win", "kind": "cell_box", "of": "img", "rows": [1,2], "cols": [1,2], "color": "RED" },
+        { "id": "cap", "kind": "text", "content": "2×2 的窗口，从左上角开始滑动",
+          "place": [{ "edge": "up", "buff": 0.6 }] }
+      ],
+      "timeline": [
+        { "do": "create", "target": "img", "run_time": 1.5 },
+        { "do": "show", "target": "win" },
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "wait", "time": 0.5 },
+        { "do": "move_cells", "target": "win", "of": "img", "rows": [2,3], "cols": [2,3], "run_time": 2.0 },
+        { "do": "indicate", "target": "win", "run_time": 1.0 }
+      ]
+    },
+    {
+      "id": 2,
+      "duration": 3.2,
+      "elements": [
+        { "id": "img", "carry": true },
+        { "id": "win", "carry": true },
+        { "id": "res", "kind": "formula", "content": "1 + 0 + 1 + 0 = 2", "font_size": 34,
+          "color": "ACCENT", "place": [{ "corner": "dr", "buff": 1.0 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "res", "run_time": 1.2 },
+        { "do": "indicate", "target": "win", "run_time": 1.0 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    }
+  ]
+}'''
+
+# 示例 3：纯概念问答。这是最容易被忽略的一种合法产物 —— 模型看到前两个示例全是动画，
+# 会倾向于"给什么题都硬造分镜"。这里把 intent=none 的形态整体摆出来。
+_EXAMPLE_NONE = '''{
+  "brief": "直角三角形就是有一个角是 90° 的三角形。那个直角所对的边叫斜边，它最长；另外两条边叫直角边。三边满足勾股定理：两条直角边的平方和等于斜边的平方。",
+  "intent": "none",
+  "outline": [],
+  "title": "什么是直角三角形",
+  "problem_type": "geometry",
+  "scenes": []
+}'''
+
 
 def build_system_prompt(extra_rules=""):
     """system prompt = 红线 + 设计规范 + 元素/动作规格（从 dsl.py 自动生成）+ 示例。"""
@@ -998,70 +1219,157 @@ def build_system_prompt(extra_rules=""):
         "你是一名数学讲解视频的分镜师。你的唯一任务：把用户给的数学题，"
         "设计成一份**分镜 JSON**。",
         "",
+        # 为什么要点破引擎：模型对 Manim 有很强的先验（知道 always_redraw 每帧重建、
+        # 知道公式要 LaTeX 编译），用上这份先验能明显改善「画面引擎」的取舍质量 ——
+        # 而对能力的边界感，是"别设计渲不出来的东西"的前提。
+        # 但**必须同时收紧红线 1**（见下面第一条）：点破引擎的直接副作用，就是模型
+        # 开始拿 Manim 的类名当 kind 填（Axes / Brace / SurroundingRectangle…）。
+        "这份 JSON 会被确定性地编译成 **Manim**（Python 数学动画库）代码，渲染成视频。"
+        "你可以用对 Manim 的了解来判断什么画面好做、什么代价高，但请记住："
+        "**你输出的不是 Manim 代码**，而是一套小写下划线的 DSL —— 两者的名字是"
+        "**故意错开**的，别把 Manim 的类名搬过来。",
+        "",
+        "几条帮你取舍的常识：",
+        "- 含 `$tracker` 引用（或 `live: true`）的元素每帧都要重建，"
+        "**代价远高于静态元素**，一个分镜里别放一堆。",
+        "- 公式要经过 LaTeX 编译，**重复变化的公式尤其贵**；能写成普通文字就别写成公式。",
+        "- 元素库里没有 3D、shader、交互、外部图片/视频，也没有镜头运镜。"
+        "这类画面设计不出来 —— 别往那个方向想。",
+        "",
         "## 输出格式（最重要）",
         "只输出一个 JSON 对象。不要 Markdown 围栏、不要任何解释文字、不要注释。",
+        # 思考预算这条是给**开了深度思考的模型**写的：思考与正文共用同一个 max_tokens，
+        # 实测有整轮卡死在思考里、正文一个字都没出来、最后连接被上游挂到读超时的
+        # （HANDOFF §8.35）。示例里那句"想清楚就动笔"原本只在**截断重试**时才说，
+        # 那时已经白烧一次调用和几分钟了 —— 必须提前到第一次调用就说。
+        "⚠️ 思考与正文共用同一个 token 预算，它有硬上限。**想清楚画面引擎就直接动笔**："
+        "不要在思考里逐帧推演、不要罗列备选方案、不要写完再自查一遍 —— "
+        "思考把预算烧穿的代价是正文一个字都写不出来，这一轮等于白做。",
         "**键的顺序必须严格照下面的来，尤其 brief 必须是第一个键，不要调整**"
         "（前端靠这个顺序做到「1~2 秒就有字可显示」）：",
         "{",
-        '  "brief": "先用 2~3 句话直接回答这道题（讲人话，不要客套话，不要双引号）",',
+        '  "brief": "先用 2~3 句话直接回答这道题（讲人话，不要客套话，不要双引号，300 字以内）",',
         '  "intent": "propose",',
-        '  "outline": [ {"id": 1, "title": "分镜标题", "durationSec": 4.5, "summary": "这一镜讲什么"} ],',
+        '  "outline": [ {"id": 1, "title": "分镜标题", "durationSec": 9, "summary": "这一镜讲什么"} ],',
         '  "title": "整个讲解的标题",',
-        '  "problem_type": "题型",',
+        '  "problem_type": "题型标签（英文小写下划线），见下面「第一步」，要在里面先选一个",',
         '  "scenes": [ 分镜, ... ]',
         "}",
         "每个分镜 = {\"id\": 整数, \"duration\": 秒数, \"elements\": [...], \"timeline\": [...]}",
         "",
         "## intent 与 outline 的规则",
         '1. 适合用动画讲的题（求极值、证明、几何、函数图像、求面积…）→ intent 取 "propose"，'
-        "此时 outline 每个分镜一条，与 scenes 一一对应（durationSec 与分镜的 duration 保持一致）。",
+        "此时 outline 每个分镜一条，与 scenes 一一对应（durationSec 与那一镜的 duration 写同一个数）。",
         '2. 纯概念问答（"什么是直角三角形"、"导数是干嘛的"、"这个公式怎么读"）→ intent 取 "none"，'
         "此时 **outline 和 scenes 都给空数组 []**，只把答案写在 brief 里。"
         "不要为了凑动画硬造分镜。",
         "3. brief 是「不看视频也能看懂」的那段话：给出结论和关键一步，"
-        "不要写成「下面我用动画演示一下」这类空话。",
+        "不要写成「下面我用动画演示一下」这类空话。**它不能为空** —— 纯问答时它就是全部回答。",
+        "4. title、outline 的 title / summary 都是给中文用户看的，写中文，别太长。",
         "",
-        "## 红线（违反会被校验层直接拒绝，然后你会收到错误信息重做）",
-        "1. 你不写任何代码。只能用下面规格里列出的元素类型（kind）和动作（do），"
-        "不能发明新的。",
+        "## 红线（违反会被校验层拒绝，你会一次收到**全部**错误，请一次改完）",
+        "1. 你不写任何代码。元素类型（kind）和动作（do）**只认下面规格里列出的名字**"
+        "（全小写、下划线分隔），不能发明新的；每个动作的附加参数名也是写死的"
+        "（规格里标了 `args`）。"
+        "⚠️ 规格里的这些名字和 Manim 的类名/方法名**故意错开**，就是为了让你没法凭 Manim 的"
+        "记忆直接填 —— 凡是规格里没列出的名字，不管它在 Manim 里多常见，在这里一律非法。",
         "2. 元素必须先写在该分镜的 elements 里，才能被 timeline 或别的元素引用。"
         "引用不存在的 id 会报错。",
-        "3. 颜色只能用规格里给出的 Manim 常量名（BLUE/RED/GREEN/PRIMARY/ACCENT...）"
-        "或 #RRGGBB。拼错颜色名会报错。",
-        "4. 数学表达式只能用 x、数字、四则运算、** 幂，以及白名单函数"
-        "（sin/cos/tan/exp/log/sqrt/abs/min/max/floor/pi/e...）。不能调用别的东西。",
-        "5. 含 tracker 引用（\"$名字\"）的元素是动态元素，"
+        "3. 颜色名与数学函数是**封闭白名单**（规格最后「硬性规则」里列全了），"
+        "不要凭印象拼写（写 LIGHT_BLUE / arcsinx 这类不存在的名字会被直接拒绝）。",
+        "4. 含 tracker 引用（\"$名字\"）的元素是动态元素，"
         "**不会自动上屏，必须用 {\"do\":\"show\",\"target\":\"...\"} 显式显示**。",
         "",
+        "## 第一步：先判题型，再决定这道题的「画面引擎」",
+        "**这一步决定成品有没有模板味，比后面所有细节都重要。**",
+        "拿到题先归类（problem_type 就从这里选一个），再回答一个问题：这道题最关键的"
+        "**变化 / 对比 / 累积 / 构造**过程，用什么画面能让人一眼看见？"
+        "把它定为主体分镜的机制，其余元素都为它服务。",
+        "",
+        "各题型的**典型画面引擎**（是提示，不是让你从里面挑一个套上去）：",
+        "- `function_analysis`（函数图像、单调性、极值、切线）→ **参数扫描**："
+        "一个 tracker 驱动的动点走一遍，切线/函数值跟着变，旁边同步显示数值。",
+        "- `geometry`（几何、证明、图形关系）→ **只画图形本身**"
+        "（polygon / angle / brace / highlight），靠平移、旋转、割补、拼接让结论自己浮出来。",
+        "- `area_integral`（面积、积分、累积量）→ **分割与累加**：把区域切成小块，"
+        "逐块长出来，块数变多时逼近真值（area / riemann）。",
+        "- `algebra`（方程、不等式、恒等变形）→ **两边同做一件事**：对两边同时加/乘/移项，"
+        "把差异画出来，临界时刻定格。",
+        "- `sequence_series`（数列、求和、归纳、级数）→ **累积构建**：一项一项长出来"
+        "（`create` + `lag_ratio`），或对称配对消去。",
+        "- `limit`（极限、逼近、收敛）→ 让参数连续扫过临界值，定格在"
+        "「无限接近但取不到」的那一刻。",
+        "- `probability`（概率、计数、组合）→ **穷举或树状展开**，或用频率逐步逼近理论值。",
+        "- `concept`（纯概念问答）→ 不出动画（intent=none），或只做一个概念示意图。",
+        "",
+        "### 三条**反模板**硬要求（违反就是白做，请重做）",
+        "1. **不要默认上坐标系。** 只有函数图像、解析几何、参数扫描这几类题才该出现 "
+        "`axes`。几何题画多边形，网格/矩阵题画表格，概率题画点阵或树 —— "
+        "一道几何证明里出现 `axes`，基本就是跑题的信号。",
+        "2. **至少有一个分镜要有「只有这道题才有」的东西**：一个具体数值、"
+        "一个特定位置的动点、一段真的推导步骤。把所有名词换成「函数」「图形」「公式」"
+        "之后依然成立的分镜，就是模板分镜，删掉重想。",
+        "3. **不要每镜都是同一套元素。** 封面镜、结论镜可以纯文字；"
+        "图形只出现在真的需要看见它的那一两镜里。"
+        "每一镜都摆 text + formula + 同一个坐标系，是最典型的模板产物。",
+        "",
         "## 分镜设计规范",
-        "- 通常 3~6 个分镜：封面（这题问什么）→ 图形/推导（主体）→ 结论。",
-        "- 每个分镜 duration 4~12 秒；屏幕上元素别超过 8 个，多了会挤。",
+        "- 分镜数量按内容定，2~6 个都行。**不要为了凑结构硬加一个「封面镜」**——"
+        "标题本身没有信息量就直接从内容开始。",
+        "- 每个分镜 duration 建议 4~12 秒，但**别为这个数字硬拆**："
+        "单个分镜最长 120 秒、timeline 最多 80 个动作，够长的。",
+        "- ⚠️ **连贯的过程不要拆成多镜、每镜各画一遍。** 分镜边界会把画面全部淡出、"
+        "每个分镜都从空白画起，所以同一个东西在下一镜里只能重画 —— "
+        "观感上等于「从头再来」，这是最常见的质量事故（数组类内容尤其明显）。"
+        "两种正确写法：① **用一个长分镜 + 一条长 timeline 一口气演完**"
+        "（二分查找、排序、迭代收敛这类步骤多的内容就该这样）；"
+        "② 确实要分镜时，把该一直留在屏上的东西用 `carry` 承接过去"
+        "（写法见规格里的「跨分镜延续：carry」，示例 3 就是）。",
+        "- 每个分镜屏幕上元素别超过 8 个，多了会挤。",
+        "- duration 是**目标节奏**，不是硬约束：把 timeline 里所有动作的耗时加起来"
+        "（parallel 段按最长的那个算，省略 run_time 就用规格里的默认值），"
+        "这个和应该≈ duration，差 1 秒以内都正常。和偏小会自动补停顿；"
+        "偏大不会报错，但视频会比声明的长。",
         "- 中文文字放 text 的 content；公式放 formula，或写在 text 的 $...$ 里做混排。",
         "- 讲「变化」「联动」（动点滑动、切线跟着转、参数在变）时，"
         "**必须**用 tracker + \"$名字\" 引用，不要写成死的数字——那才是这个 DSL 的价值。",
         "- 结论分镜要给出明确的数学结论（公式或数值），不要只说\"所以得证\"。",
         "- 讲网格类内容（卷积/池化/滑动窗口/棋盘格/矩阵）：格子用 table，"
         "框选与滑动用 cell_box + move_cells（框的位置由格子算出来）。"
-        "**不要**用 rect + move_to 自己估坐标框格子 —— 格子尺寸是内容撑出来的，估出来一定歪。",
+        "**不要**用 rect + move_to 自己估坐标框格子 —— 格子尺寸是内容撑出来的，估出来一定歪。"
+        "格子想统一大小就写 cell_w/cell_h，想紧凑把 pad_x 调小（默认 1.3 偏大）。",
+        "- ⚠️ **同一个位置换文字（底部字幕、逐句解释）必须用 `replace`** ——"
+        "它会把旧文字下屏、新文字上屏；再 create 一个新 text 会和旧文字叠在一起。"
+        "默认 effect 是 crossfade（淡出淡入），换字幕就用默认值或 \"slide\"，"
+        "别用 \"morph\"（那是给图形变形用的）。",
+        "- ⚠️ 元素太大放不下会被**直接拒绝**（不是帮你缩小）：报错会写明估算尺寸、可用范围"
+        "和改法。别指望靠缩小字号硬塞，一条超宽的表/一行太长的文字请**减列、换行或拆分镜**。",
         "",
         "## 元素与动作规格（唯一权威来源，严格按此生成）",
         dsl.describe(),
         "",
-        "## 参考示例（注意 envelope 结构、tracker 的用法、show 的上屏时机）",
+        "## 参考示例",
+        "四个示例都**必须看完**。它们只示范**怎么写**（envelope 结构、tracker 的引用方式、"
+        "`show` 的上屏时机、duration 怎么凑够），"
+        "**不是让你照抄它们的结构** —— 示例 1 里有坐标系，是因为那道题本身就是函数题；"
+        "换一道几何题还上坐标系，就是跑题。",
+        "",
+        "示例 1（函数题：tracker 驱动的参数扫描）：",
         _EXAMPLE,
+        "",
+        "示例 2（几何题：**全程没有 axes**，只用 polygon / angle 把图形本身画出来）：",
+        _EXAMPLE_GEOMETRY,
+        "",
+        "示例 3（网格类：table + cell_box + move_cells；第二镜用 **carry** 承接网格，"
+        "没有重画。这也是 {\"center\": true} 的正确写法）：",
+        _EXAMPLE_GRID,
+        "",
+        "示例 4（纯概念问答：intent=none，只回文字不给动画）：",
+        _EXAMPLE_NONE,
     ]
     if extra_rules:
         parts += ["", "## 补充要求（本次调用专属）", str(extra_rules).strip()]
     return "\n".join(parts)
-
-
-def build_user_prompt(problem):
-    return (
-        "请把下面这道题设计成分镜 JSON。\n"
-        "要求：图形与推导要真的对得上这道题，不要套模板话术。\n"
-        "只输出 JSON 对象本身。\n\n"
-        "---- 题目 ----\n" + str(problem).strip()
-    )
 
 
 # 多轮对话：预算与裁剪
@@ -1154,11 +1462,84 @@ _FEEDBACK_JSON = (
 )
 
 _FEEDBACK_SCHEMA = (
-    "你上一次的分镜 JSON 没有通过校验，错误如下：\n\n"
+    "你上一次的分镜 JSON 没有通过校验，**全部**错误如下：\n\n"
     "  {err}\n\n"
-    "请针对这个错误修正后**重新输出完整的 JSON 对象**（不是补丁、不是片段，"
-    "是完整的那一份）。其余部分保持你原来的设计，只改错的地方。"
+    "请把这些错误**一次全部改掉**，然后**重新输出完整的 JSON 对象**"
+    "（不是补丁、不是片段，是完整的那一份；键顺序仍是 brief 在最前）。"
+    "没有报错的部分保持你原来的设计。"
 )
+
+_FEEDBACK_TRUNCATED = (
+    "你上一次的输出被**长度上限截断**了（finish_reason=length）：思考占掉了绝大部分 "
+    "token 预算，正文还没写完就断了。\n"
+    "请**大幅压缩思考**，直接按约定的结构把 JSON 写出来 —— 不要复述题目、"
+    "不要罗列备选方案、不要写完再自我检查一遍。想清楚就动笔。\n"
+    "仍然要输出**完整的 JSON 对象**，brief 在最前。"
+)
+
+_FEEDBACK_BRIEF = (
+    "你上一次的输出里 `brief` 缺失或为空。\n"
+    "brief 是直接展示给用户的文字回答（纯概念问答时它就是**全部**内容），"
+    "**不能为空**，而且必须是 JSON 的**第一个键**。\n"
+    "请按 brief → intent → outline → title → problem_type → scenes 的顺序"
+    "重新输出**完整的 JSON 对象**，其余内容保持你原来的设计。"
+)
+
+# 校验错误的回灌上限。合并报错后一条消息里可能有多处问题，600 字符会把后面的砍掉
+# （模型只改看得见的那一条，下一轮又撞上下一条 —— 白烧一次重试）。
+# dsl._format_errors() 已把总长压到 1800 字符左右，这里留出余量。
+_ERR_LIMIT = 2400
+
+# 解析错误信息的回灌上限。比 _ERR_LIMIT 小是**故意的**：
+# parse_json_object() 的报错里前半段是"出错行列 + 提示"（真正有用的部分），
+# 后半段是"原文前 600 字符"（和上面回灌给它的那份重复）。留 800 字符刚好保住
+# 前半段的提示（含"回复被截断了"那条），把重复的原文让位给 _echo_back。
+_JSON_ERR_LIMIT = 800
+
+# 回灌"你自己上一轮写了什么"的长度上限。
+#
+# ⚠️ 这个值不能小：一份 4~6 分镜的 JSON 轻松超过 3000 字符（示例 1 单镜就 1000+），
+# 而反馈语要求它「重新输出完整的那一份」。原先截到 3000，模型看到的是一份**腰斩的
+# JSON**，很自然地顺着断口续写，于是再炸一次 —— 反馈语和回灌内容是互相矛盾的。
+_ECHO_LIMIT = 12000
+
+
+def _echo_back(text):
+    """
+    把模型上一轮输出回灌给它自己。
+
+    超长时**明说"这是被截断的"**，而不是默默切一刀：默默截断会让模型以为自己
+    写完了，然后"只改错的地方"—— 结果输出一个残缺的分镜。
+    """
+    s = str(text or "")
+    if len(s) <= _ECHO_LIMIT:
+        return s
+    return (s[:_ECHO_LIMIT] +
+            f"\n\n...（你上一轮的输出共 {len(s)} 字符，此处只显示前 {_ECHO_LIMIT} 字符。"
+            f"请**完整重写**整份 JSON，不要顺着上面的断口续写。）")
+
+
+def _brief_of(raw):
+    """取出 brief；缺失/非字符串/空白一律返回 None。"""
+    v = raw.get("brief") if isinstance(raw, dict) else None
+    if not isinstance(v, str) or not v.strip():
+        return None
+    return v.strip()
+
+
+def _warn_brief_order(raw, verbose=True):
+    """
+    检查 brief 是不是第一个键。
+
+    只**告警不重试**：键序错了 JSON 本身仍然合法（BriefTap 会一直往后扫，
+    照样能找到 brief），损失的只是"1~2 秒见字"这个体验。而重试轮走的是
+    非流式，重来一次也换不回流式体验，纯属白花一次调用。
+    但必须喊出来 —— 否则"用户要干等十几秒"会被当成正常现象，没人知道该修哪。
+    """
+    first = next(iter(raw), None) if isinstance(raw, dict) else None
+    if first != "brief" and verbose:
+        print(f"      [WARN] brief 不是第一个键（实际首个是 {first!r}）——"
+              f" 流式期间不会吐字，用户要等整份 JSON 生成完才看到回答")
 
 
 # ==============================================================================
@@ -1206,8 +1587,23 @@ def generate_storyboard(problem, cfg, registry, max_attempts=4,
 
     for attempt in range(1, max_attempts + 1):
         t0 = time.time()
-        text = chat(messages, cfg, json_mode=jm, purpose="storyboard")
+        meta = {}
+        text = chat(messages, cfg, json_mode=jm, purpose="storyboard", seen=meta)
         dt = time.time() - t0
+
+        # 截断**先于解析**判断：JSON 被砍断时解析层只能说"语法错 / 疑似截断"，
+        # 而这里能给出确定结论 + 明确修法（压缩思考），也省掉一次白跑的解析。
+        if meta.get("finish_reason") == "length":
+            attempts_log.append({"attempt": attempt, "ok": False,
+                                 "seconds": round(dt, 1),
+                                 "error": "输出被 max_tokens 截断（finish_reason=length）"})
+            if verbose:
+                print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
+                      f"→ 输出被截断（思考吃光了预算），回灌重试")
+            last_err = LLMError("输出被 max_tokens 截断（finish_reason=length）")
+            messages.append({"role": "assistant", "content": _echo_back(text)})
+            messages.append({"role": "user", "content": _FEEDBACK_TRUNCATED})
+            continue
 
         # 先尝试解析
         try:
@@ -1220,10 +1616,25 @@ def generate_storyboard(problem, cfg, registry, max_attempts=4,
                 print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
                       f"→ JSON 解析失败，回灌错误重试")
             last_err = e
-            messages.append({"role": "assistant", "content": str(text)[:3000]})
+            messages.append({"role": "assistant", "content": _echo_back(text)})
             messages.append({"role": "user",
-                             "content": _FEEDBACK_JSON.format(err=str(e)[:400])})
+                             "content": _FEEDBACK_JSON.format(err=str(e)[:_JSON_ERR_LIMIT])})
             continue
+
+        # brief 为空等于这次生成对用户毫无产出（纯问答时更是全部内容），必须重试。
+        # 它虽然不在 schema 的硬校验里，但"静默地不给回答"比报错严重得多。
+        if _brief_of(raw) is None:
+            attempts_log.append({"attempt": attempt, "ok": False,
+                                 "seconds": round(dt, 1), "error": "brief 缺失或为空"})
+            if verbose:
+                print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
+                      f"→ brief 为空，回灌重试")
+            last_err = LLMError("brief 缺失或为空")
+            messages.append({"role": "assistant",
+                             "content": _echo_back(json.dumps(raw, ensure_ascii=False))})
+            messages.append({"role": "user", "content": _FEEDBACK_BRIEF})
+            continue
+        _warn_brief_order(raw, verbose)
 
         # 再尝试校验（这一层是决策 1 的执行者：不确定的东西在这里被拦下）
         try:
@@ -1237,9 +1648,9 @@ def generate_storyboard(problem, cfg, registry, max_attempts=4,
                       f"→ 校验失败，回灌错误重试：{e}")
             last_err = e
             messages.append({"role": "assistant",
-                             "content": json.dumps(raw, ensure_ascii=False)[:3000]})
+                             "content": _echo_back(json.dumps(raw, ensure_ascii=False))})
             messages.append({"role": "user",
-                             "content": _FEEDBACK_SCHEMA.format(err=str(e)[:600])})
+                             "content": _FEEDBACK_SCHEMA.format(err=str(e)[:_ERR_LIMIT])})
             continue
 
         n_sc = len(sb.get("scenes", []))
@@ -1295,11 +1706,18 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
     last_err = None
     use_stream = True
     streamed = False
+    # 用户是否已经看到过回答文字。重试轮走的是非流式，所以"首轮一个字都没吐出去"
+    # （brief 缺失、被网关重排、或流式降级）时必须在结束前补发一次，
+    # 否则用户看到的是"思考完了，然后什么都没有"，且**不报任何错**。
+    emitted = False
     # 策略在这一层定好，往下只传具体布尔值（理由见 chat() 的注释）
     jm = effective_json_mode(cfg, json_mode)
 
     for attempt in range(1, max_attempts + 1):
         t0 = time.time()
+        # 收 finish_reason / usage 的出口（流式与非流式共用同一个 dict，
+        # 因为下面两条分支都可能跑，而判断截断只看这一次调用的结果）
+        meta = {}
         if use_stream:
             pieces = []
             tap = BriefTap()
@@ -1309,11 +1727,12 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
             try:
                 for piece in chat_stream(messages, cfg, json_mode=jm,
                                          purpose="storyboard",
-                                         on_reasoning=thinking):
+                                         on_reasoning=thinking, seen=meta):
                     pieces.append(piece)
                     if on_delta:
                         visible = tap.feed(piece)
                         if visible:
+                            emitted = True
                             on_delta(visible)
                 text = "".join(pieces)
                 streamed = True
@@ -1321,15 +1740,35 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
                 # 部分厂商/网关不支持 `stream: true`（或提前断流）。
                 # 一条路走不通就退回非流式重来这一次 —— 降级只损失"秒级见字"，
                 # 不该让整个请求失败。
-                if pieces:
+                #
+                # ⚠️ 判据必须是"这一条流上**收没收到过任何增量**"，而不是只看正文 pieces：
+                # 思考走单独的字段，模型完全可能吐了两万字思考、正文一个字没出就被上游
+                # 掐掉（思考把预算烧穿的典型形态）。那种情况流式明明是好用的，
+                # 退回非流式只会**再发一次请求**，让用户又干等几分钟（HANDOFF §8.35）。
+                if pieces or meta.get("reasoning_chars"):
                     raise
                 if verbose:
                     print(f"      [LLM] 流式不可用（{e}），退回非流式")
                 use_stream = False
-                text = chat(messages, cfg, json_mode=jm, purpose="storyboard")
+                text = chat(messages, cfg, json_mode=jm, purpose="storyboard",
+                            seen=meta)
         else:
-            text = chat(messages, cfg, json_mode=jm, purpose="storyboard")
+            text = chat(messages, cfg, json_mode=jm, purpose="storyboard", seen=meta)
         dt = time.time() - t0
+
+        # 截断**先于解析**判断（理由同 generate_storyboard）
+        if meta.get("finish_reason") == "length":
+            attempts_log.append({"attempt": attempt, "ok": False,
+                                 "seconds": round(dt, 1),
+                                 "error": "输出被 max_tokens 截断（finish_reason=length）"})
+            if verbose:
+                print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
+                      f"→ 输出被截断（思考吃光了预算），回灌重试")
+            last_err = LLMError("输出被 max_tokens 截断（finish_reason=length）")
+            use_stream = False
+            messages.append({"role": "assistant", "content": _echo_back(text)})
+            messages.append({"role": "user", "content": _FEEDBACK_TRUNCATED})
+            continue
 
         # 先尝试解析
         try:
@@ -1342,10 +1781,25 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
                       f"→ JSON 解析失败，回灌错误重试")
             last_err = e
             use_stream = False
-            messages.append({"role": "assistant", "content": str(text)[:3000]})
+            messages.append({"role": "assistant", "content": _echo_back(text)})
             messages.append({"role": "user",
-                             "content": _FEEDBACK_JSON.format(err=str(e)[:400])})
+                             "content": _FEEDBACK_JSON.format(err=str(e)[:_JSON_ERR_LIMIT])})
             continue
+
+        # brief 为空等于这次生成对用户毫无产出（纯问答时更是全部内容），必须重试。
+        if _brief_of(raw) is None:
+            attempts_log.append({"attempt": attempt, "ok": False,
+                                 "seconds": round(dt, 1), "error": "brief 缺失或为空"})
+            if verbose:
+                print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
+                      f"→ brief 为空，回灌重试")
+            last_err = LLMError("brief 缺失或为空")
+            use_stream = False
+            messages.append({"role": "assistant",
+                             "content": _echo_back(json.dumps(raw, ensure_ascii=False))})
+            messages.append({"role": "user", "content": _FEEDBACK_BRIEF})
+            continue
+        _warn_brief_order(raw, verbose)
 
         # 再尝试校验（决策 1 的执行者）
         try:
@@ -1359,10 +1813,19 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
             last_err = e
             use_stream = False
             messages.append({"role": "assistant",
-                             "content": json.dumps(raw, ensure_ascii=False)[:3000]})
+                             "content": _echo_back(json.dumps(raw, ensure_ascii=False))})
             messages.append({"role": "user",
-                             "content": _FEEDBACK_SCHEMA.format(err=str(e)[:600])})
+                             "content": _FEEDBACK_SCHEMA.format(err=str(e)[:_ERR_LIMIT])})
             continue
+
+        # 兜底补发：整条链路走完，用户一个字都还没看到（brief 不在流里 / 流式降级 /
+        # 首轮就失败过）。这里把 brief 整段送出去 —— 时机上晚了，但比"什么都没有"好，
+        # 而且这一步不做的话，这种失败**完全不可见**（不报错、日志也正常）。
+        if on_delta and not emitted:
+            brief = _brief_of(raw)
+            if brief:
+                emitted = True
+                on_delta(brief)
 
         n_sc = len(sb.get("scenes", []))
         attempts_log.append({"attempt": attempt, "ok": True, "seconds": round(dt, 1),
@@ -1460,9 +1923,12 @@ def regenerate_scene(instruction, scene, registry, cfg=None, context=None,
         t0 = time.time()
         # 注意：chat() 的失败（网络/鉴权）是**整条链的失败**，必须直接抛出去，
         # 不能被下面的"回灌重试"吞掉 —— 那样只会把同一个接口错误再问三遍。
-        text = chat(messages, cfg, json_mode=jm, purpose="scene")
+        meta = {}
+        text = chat(messages, cfg, json_mode=jm, purpose="scene", seen=meta)
         dt = time.time() - t0
         try:
+            if meta.get("finish_reason") == "length":
+                raise LLMError("输出被 max_tokens 截断（finish_reason=length）")
             obj = parse_json_object(text)
             cand = obj
             # 模型常见三种包装：直接给分镜 / {"scene":{...}} / {"scenes":[{...}]}
@@ -1497,9 +1963,9 @@ def regenerate_scene(instruction, scene, registry, cfg=None, context=None,
             if verbose:
                 print(f"      [LLM 分镜重生成 {attempt}/{max_attempts}] {dt:.1f}s "
                       f"→ 失败，回灌错误重试：{e}")
-            messages.append({"role": "assistant", "content": str(text)[:3000]})
+            messages.append({"role": "assistant", "content": _echo_back(text)})
             messages.append({"role": "user",
-                             "content": _FEEDBACK_SCHEMA.format(err=str(e)[:600])})
+                             "content": _FEEDBACK_SCHEMA.format(err=str(e)[:_ERR_LIMIT])})
 
     raise LLMError(
         f"这个分镜连续 {max_attempts} 次都没能改对。\n最后一次的错误：{last_err}"

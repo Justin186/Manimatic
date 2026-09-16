@@ -30,6 +30,7 @@ PRIMARY   = "#58C4DD"
 SECONDARY = "#83C167"
 ACCENT    = "#FFFF00"
 CN_FONT   = "{cn_font}"
+LATIN_FONT = "{latin_font}"     # 数字/字母专用（中文仍走 CN_FONT）
 
 USE_LATEX = {use_latex}
 
@@ -120,8 +121,18 @@ StoryboardScene.ON_SECTION = staticmethod(_sb_on_section)
 '''
 
 
-def _prepare_env(use_latex: bool, fast: bool = False) -> dict:
-    """探测 LaTeX 并组装渲染环境。找不到就降级，绝不让渲染直接崩掉。"""
+def _prepare_env(use_latex: bool, fast: bool = False,
+                 carry_mode: str = "rebuild") -> dict:
+    """探测 LaTeX 并组装渲染环境。找不到就降级，绝不让渲染直接崩掉。
+
+    Args:
+        carry_mode: 「承接元素」（`carry`）怎么处理，两条编排路径必须分开：
+            `reuse`   —— 所有分镜拼成**一个** Scene（`render()`），共用同一个
+                         construct() 作用域，上一分镜的元素变量还活着、对象还在屏上，
+                         所以承接元素**一行代码都不生成**。
+            `rebuild` —— 每个分镜是独立文件、独立 Scene（`render_split()`），
+                         变量不存在，只能重建一次并立刻 add（不走入场动画）。
+    """
     if use_latex:
         info = latex_env.detect()
         if not info["available"]:
@@ -129,7 +140,8 @@ def _prepare_env(use_latex: bool, fast: bool = False) -> dict:
             use_latex = False
         elif info["injected"]:
             print(f"      [PATH+] 已注入 TeX 目录: {info['injected'][0]}")
-    return {"formula": "formula", "use_latex": use_latex, "fast": fast}
+    return {"formula": "formula", "use_latex": use_latex, "fast": fast,
+            "carry_mode": carry_mode}
 
 
 def _scene_code(sc, env):
@@ -160,9 +172,58 @@ _CLEAR = (
 )
 
 
+def _carried(scene) -> list:
+    """一个分镜里所有 `carry`（承接上一分镜）的元素 id。"""
+    return [el["id"] for el in (scene or {}).get("elements", [])
+            if isinstance(el, dict) and el.get("carry")]
+
+
+def _clear_except(keep_ids) -> str:
+    """
+    分镜边界的清屏片段：把上一镜的残留淡出，但**承接过来的元素留着**。
+
+    为什么不能一律 `clear()`：carry 的全部意义就是"接着上一镜继续演"。
+    清掉它不只是少了 0.35 秒的淡出 —— 下一镜的代码里根本不会重建它
+    （reuse 模式下承接元素一行代码都不生成），画面会直接空掉。
+
+    为什么用 `m is not k` 的身份比较而不是 `m not in [...]`：manim 的 Mobject
+    定义了 `__eq__`（按点集比较），用 `in` 会在两个内容相同的对象之间误判。
+    """
+    if not keep_ids:
+        return _CLEAR          # 没有承接元素时逐字节沿用原片段，老分镜零影响
+    keep = ", ".join(dsl.var_name(i) for i in sorted(keep_ids))
+    return (
+        "        # ---- 清屏：移除上一个分镜的残留（承接过来的元素留着）----\n"
+        f"        _keep = [{keep}]\n"
+        "        _doomed = [m for m in self.mobjects if all(m is not k for k in _keep)]\n"
+        "        if _doomed:\n"
+        "            self.play(FadeOut(Group(*_doomed)), run_time=0.35)\n"
+        "            self.remove(*_doomed)\n"
+    )
+
+
+def _tail_fade(keep_ids) -> str:
+    """
+    拆分渲染时每个分镜**末尾**的淡出。`keep_ids` 是下一分镜要承接的元素 —— 它们不能淡出，
+    否则下一段开头就会缺东西（虽然 rebuild 模式下会被重新 add，但那是一次肉眼可见的闪断）。
+    """
+    if not keep_ids:
+        return ("\n        if self.mobjects:\n"
+                "            self.play(FadeOut(Group(*self.mobjects)), run_time=0.35)\n")
+    keep = ", ".join(dsl.var_name(i) for i in sorted(keep_ids))
+    return (
+        "\n        # ---- 末尾淡出：下一分镜要承接的元素留着 ----\n"
+        f"        _keep = [{keep}]\n"
+        "        _doomed = [m for m in self.mobjects if all(m is not k for k in _keep)]\n"
+        "        if _doomed:\n"
+        "            self.play(FadeOut(Group(*_doomed)), run_time=0.35)\n"
+    )
+
+
 def render(storyboard: dict,
            use_latex: bool = True,
            cn_font: str = "STZhongsong",
+           latin_font: str = "Times New Roman",
            fast: bool = False,
            sections: bool = False) -> str:
     """
@@ -172,6 +233,9 @@ def render(storyboard: dict,
         storyboard: 已经过 schema.validate() 的分镜 dict
         use_latex: 是否用 LaTeX 渲染公式（没装 LaTeX 时传 False）
         cn_font: 中文字体
+        latin_font: 数字/字母字体（默认新罗马体）。两者是**分开**的：
+            CN_FONT 自带拉丁字形，Pango 不会为数字/字母去 fallback，
+            所以必须显式指定，见 dsl.RUNTIME_HELPER 里的 _text()。
         sections: 开启"边渲边切"：在每个分镜开头插 `self.section(n)`，
             该分镜渲完就立刻把它的 partial 片段合并成一个 mp4 并打一行
             `@@ {json}` 到 stdout（父进程按行读 → 可立刻推给前端）。
@@ -181,13 +245,15 @@ def render(storyboard: dict,
     Returns:
         Manim 场景源码字符串
     """
-    env = _prepare_env(use_latex, fast)
+    # 一个 Scene 演到底：承接元素靠"共用同一个 construct() 作用域"活下来
+    env = _prepare_env(use_latex, fast, carry_mode="reuse")
     scenes = storyboard["scenes"]
 
     blocks = []
     for idx, sc in enumerate(scenes):
         code, label = _scene_code(sc, env)
-        head = "" if idx == 0 else _CLEAR
+        # 边界清屏：本分镜**承接过来**的元素要留着（没有 carry 时就是原来那段 _CLEAR）
+        head = "" if idx == 0 else _clear_except(_carried(sc))
         # 分段点放在 _CLEAR 之前：清屏是"下一个分镜开始前的准备"，算进新分镜更自然。
         # 第一个分镜也插 —— manim 启动时会自带一个空的 autocreated section，
         # self.section(1) 内部的 next_section() 会把它删掉（finish_last_section 弹掉空段）。
@@ -198,6 +264,7 @@ def render(storyboard: dict,
         title=storyboard.get("title", "untitled"),
         use_latex=env["use_latex"],
         cn_font=cn_font,
+        latin_font=latin_font,
         helper=dsl.RUNTIME_HELPER,
         sections_flag=sections,
         sections_total=len(scenes),
@@ -230,6 +297,7 @@ def _check_syntax(src: str) -> None:
 def render_split(storyboard: dict,
                  use_latex: bool = True,
                  cn_font: str = "STZhongsong",
+                 latin_font: str = "Times New Roman",
                  fast: bool = False) -> list:
     """
     每个分镜生成一份**独立可渲染**的源码 —— 并行渲染用。
@@ -244,20 +312,23 @@ def render_split(storyboard: dict,
     Returns:
         [(scene_id, src), ...]，顺序与输入分镜一致
     """
-    env = _prepare_env(use_latex, fast)
+    # 每个分镜都是独立文件、独立 Scene：承接元素只能重建 + 立刻 add
+    env = _prepare_env(use_latex, fast, carry_mode="rebuild")
+    scenes = storyboard["scenes"]
     out = []
-    for idx, sc in enumerate(storyboard["scenes"]):
+    for idx, sc in enumerate(scenes):
         code, label = _scene_code(sc, env)
         # 拆分渲染后靠 ffmpeg 拼接，每个分镜末尾必须淡出，
-        # 否则片段之间会硬切（单场景模式下这一步由下一个分镜的 _CLEAR 完成）
-        code += (
-            "\n        if self.mobjects:\n"
-            "            self.play(FadeOut(Group(*self.mobjects)), run_time=0.35)\n"
-        )
+        # 否则片段之间会硬切（单场景模式下这一步由下一个分镜的 _CLEAR 完成）。
+        # ⚠️ 下一分镜要承接的元素**不能**淡出 —— 它会先淡掉、再被下一段重新 add，
+        #    中间那一下闪断肉眼可见。
+        nxt = scenes[idx + 1] if idx + 1 < len(scenes) else None
+        code += _tail_fade(_carried(nxt))
         src = HEADER.format(
             title=storyboard.get("title", "untitled"),
             use_latex=env["use_latex"],
             cn_font=cn_font,
+            latin_font=latin_font,
             helper=dsl.RUNTIME_HELPER,
             # 拆分渲染时每个文件只有一个分镜，不存在"分镜边界"，
             # 所以 SECTIONS 恒为 False（分段由 generate.py 用 ffmpeg 拼接完成）。
@@ -275,11 +346,12 @@ def render_split(storyboard: dict,
 
 
 def render_to_file(storyboard: dict, out_path: str, use_latex: bool = True,
-                   cn_font: str = "STZhongsong", fast: bool = False,
+                   cn_font: str = "STZhongsong",
+                   latin_font: str = "Times New Roman", fast: bool = False,
                    sections: bool = False) -> str:
     """渲染并写入 .py 文件，返回文件路径。"""
-    src = render(storyboard, use_latex=use_latex, cn_font=cn_font, fast=fast,
-                 sections=sections)
+    src = render(storyboard, use_latex=use_latex, cn_font=cn_font,
+                 latin_font=latin_font, fast=fast, sections=sections)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(src)

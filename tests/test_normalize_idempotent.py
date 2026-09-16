@@ -29,7 +29,7 @@ import os
 
 import pytest
 
-from storyboard import schema, templates
+from storyboard import dsl, schema, templates
 
 REGISTRY = templates.TEMPLATE_REGISTRY
 EXAMPLES_DIR = os.path.join(
@@ -180,3 +180,45 @@ def test_normalized_output_has_no_none_optionals():
         if v is None
     ]
     assert not offenders, f"规范化产物里残留了 None 可选参数：{offenders}"
+
+
+# ------------------------------------------------------------------------------
+# 表格（T_TABLE）：本轮把三条硬上限换成了尺寸估算，规范化的自洽性要重新钉一遍
+# ------------------------------------------------------------------------------
+def _table(**extra):
+    el = {"id": "arr", "kind": "table", "rows": [["0", "1"], ["2", "3"]]}
+    el.update(extra)
+    return el
+
+
+def test_table_plain_is_idempotent():
+    out = assert_idempotent(dsl_scene([_table()]), "普通表格")
+    el = out["scenes"][0]["elements"][0]
+    assert el["rows"] == [["0", "1"], ["2", "3"]]
+    # 单元格不再被截断到 80 字（那是静默改内容）
+    assert "cell_w" not in el and "pad_x" not in el
+
+
+def test_table_cell_size_params_are_idempotent():
+    """cell_w/cell_h/pad_x/pad_y 都是可选参数：写了要原样带出去，且第二遍不报错。"""
+    el = _table(cell_w=1.5, cell_h=0.9, pad_x=0.4, pad_y=0.3)
+    out = assert_idempotent(dsl_scene([el]), "带格子尺寸的表格")
+    got = out["scenes"][0]["elements"][0]
+    assert (got["cell_w"], got["cell_h"], got["pad_x"], got["pad_y"]) == (1.5, 0.9, 0.4, 0.3)
+
+
+def test_table_cell_80_char_truncation_removed():
+    """90 字的单元格必须**原样保留** —— 以前会被悄悄砍到 80（内容变了却没人知道）。"""
+    cell = "1234567890" * 9
+    out = assert_idempotent(dsl_scene([_table(rows=[[cell]], font_size=10)]), "长单元格")
+    assert out["scenes"][0]["elements"][0]["rows"][0][0] == cell
+
+
+def test_table_uneven_rows_are_rejected():
+    """
+    行不等长以前没有任何检查，会一路过校验直到 manim 的 Table 抛 ValueError
+    （非 DSLError → 变成用户的 500）。现在必须在校验层就报出可回灌的错误。
+    """
+    with pytest.raises((schema.SchemaError, dsl.DSLError)) as ei:
+        validate(dsl_scene([_table(rows=[["1", "2"], ["3"]])]))
+    assert "每行的列数必须一样" in str(ei.value)

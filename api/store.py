@@ -90,8 +90,9 @@ def media_url(rel_path):
     产物 → 对前端可用的**绝对** URL。
 
     两个细节都不能省：
-      1. 绝对地址：前端把 url 直接塞 <video src>，相对路径会打到 3000 端口（Next.js）
-         而不是后端 8000，表现为"渲染成功了但视频 404"。
+      1. `{PUBLIC_BASE_URL}` 前缀：前端只认 `pathname` 是 `/media/` 的绝对地址，会把它换成
+         同源前缀交给 Next 转发（web/src/lib/api.ts::mediaUrl）。写相对路径反而认不出来，
+         所以这里**必须**带上前缀 —— 但它是个"写法"，不代表访问者能直接连到这个地址。
       2. `?v=<mtime>`：重渲后路径完全相同（这正是增量渲染想要的效果），
          不加版本号浏览器会继续放缓存里的旧视频 —— 用户会以为"改了没生效"。
     """
@@ -159,10 +160,51 @@ def thread_messages_file(thread_id):
     return os.path.join(tasks_root(), "messages", safe_id(thread_id, "t") + ".json")
 
 
+def _merge_duplicate_ids(msgs):
+    """
+    同一个 message_id 出现多次时，**只留最后一条，并保住它第一次出现的位置**。
+
+    什么情况下会重复：前端"重新生成"复用同一个 message id（新答案要顶掉旧的），
+    以及同一发请求被送到后端两次（网络重发 / 刷新后重进）。这两种都不该在记录里
+    留下两条同 id 的条目。
+
+    重复的后果不只是前端那句 React "two children with the same key"：
+      - 喂给模型的历史里，同一句提问出现两次 —— 下一轮指代就含糊了；
+      - 侧栏副标题的"N 条对话"、标题取首句都会算错。
+
+    ⚠️ **没有 id 的条目一律不动**：判不了身份，合并等于凭空吞掉一轮对话。
+       顺序也必须保：按 id 去重（dict 保序）会把"后写的那条"挪到末尾，
+       于是助手回答跑到提问前面去了 —— 这里只**就地替换**，位置一动不动。
+    """
+    out, pos = [], {}
+    for m in msgs:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        mid = str(m.get("message_id") or "").strip()
+        if not mid:
+            out.append(m)
+            continue
+        i = pos.get(mid)
+        if i is None:
+            pos[mid] = len(out)
+            out.append(m)
+        else:
+            out[i] = m               # 内容用后写的那条，位置还是原来那个
+    return out
+
+
 def load_thread_messages(thread_id):
+    """
+    这个会话的对话记录（喂模型、推标题、恢复界面都用它）。
+
+    ⚠️ 出去之前**必须过一遍去重**：这里是所有读路径的唯一收口
+       （chat 的历史、list_threads、load_thread_detail、分享页），
+       所以已经写坏的旧记录也能在这一层被修好 —— 不必等用户删掉那条会话。
+    """
     data = _read_json(thread_messages_file(thread_id)) or {}
     msgs = data.get("messages")
-    return msgs if isinstance(msgs, list) else []
+    return _merge_duplicate_ids(msgs) if isinstance(msgs, list) else []
 
 
 def append_thread_message(thread_id, role, content, meta=None):
@@ -180,11 +222,21 @@ def append_thread_message(thread_id, role, content, meta=None):
     path = thread_messages_file(thread_id)
     data = _read_json(path) or {}
     msgs = data.get("messages")
-    msgs = msgs if isinstance(msgs, list) else []
+    msgs = _merge_duplicate_ids(msgs) if isinstance(msgs, list) else []
     entry = {"role": role, "content": text, "at": time.time()}
     if meta:
         entry.update(meta)
-    msgs.append(entry)
+    # 同一个 message_id 再写一次 = **原地覆盖这一轮**，不是又追加一轮。
+    # 前端"重新生成"就是复用同一个 id（新答案顶掉旧的）；而同一个请求被送到两次时，
+    # 也只有覆盖才能让结果和只发一次一样 —— 追加会留下两条同 id 的记录，
+    # 前端按 id 渲染直接撞 key，模型那边也会看到同一句话出现两次。
+    mid = str(entry.get("message_id") or "").strip()
+    for i, m in enumerate(msgs):
+        if mid and isinstance(m, dict) and str(m.get("message_id") or "").strip() == mid:
+            msgs[i] = entry
+            break
+    else:
+        msgs.append(entry)
     _write_json(path, {"messages": msgs, "updated_at": time.time()})
     return msgs
 

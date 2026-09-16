@@ -87,12 +87,20 @@ def _host(url):
 
 def record(purpose="chat", model="", base_url="", key="", ok=True, seconds=0.0,
            reply="", usage=None, error="", attempt=0, json_mode=False,
-           streamed=False, replayed=False, messages=None):
+           streamed=False, replayed=False, messages=None, finish_reason="",
+           max_tokens=0):
     """
     追加一条调用记录，返回这条记录（便于测试断言）。
 
     **写失败绝不能影响主流程**：留档是辅助手段，不是必经之路 ——
     磁盘满了、权限不对，都只打一行 WARN 就继续，绝不把一次成功的调用搞成失败。
+
+    Args:
+        finish_reason: 厂商给的结束原因（`stop` / `length` / …）。
+            **这是判断"回复是被 max_tokens 砍断的，还是模型自己说完的"的唯一权威信号**，
+            而且只有留档能事后回答这个问题 —— 出参返回值里没有它。
+            `"length"` 意味着思考和正文合起来顶到了 `max_tokens`：
+            对开了深度思考的模型，这一项会经常是它而不是 `stop`（HANDOFF §8.11）。
     """
     rec = {
         "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -110,6 +118,11 @@ def record(purpose="chat", model="", base_url="", key="", ok=True, seconds=0.0,
         "reply": reply or "",
         "usage": usage or None,
         "error": error or "",
+        "finish_reason": str(finish_reason or ""),
+        # 记下这一次的上限，SUMMARY 才能算"输出 tok 占了上限的百分之几" ——
+        # 那个比值直接回答"要不要调大 max_tokens"：不接近 100% 就说明
+        # 回复是模型自己收的尾，调大上限不会有任何变化。
+        "max_tokens": int(max_tokens or 0),
     }
     try:
         path = calls_path()
@@ -172,7 +185,7 @@ def last_reply(purpose=None):
     return (hit or {}).get("reply", "")
 
 
-_COUNTERS = ("calls", "replayed", "failed", "seconds",
+_COUNTERS = ("calls", "replayed", "failed", "truncated", "seconds",
              "prompt", "completion", "thinking", "cache_hit")
 
 
@@ -184,6 +197,10 @@ def summary():
     实测一次分镜生成的 completion_tokens 里有一大半是思考
     （4741~12312 个 reasoning token）。混在"输出 token"里看不出来，
     单列出来才能判断"这个思考值不值"。
+
+    `truncated` 统计 `finish_reason == "length"` 的次数 —— 也就是"思考把 token
+    预算吃光、正文被砍断"的次数。它和 `failed` **不是一回事**：截断的调用在
+    接口层面是成功的，只有这一列能把它揪出来。
     """
     rows, total = {}, {k: (0.0 if k == "seconds" else 0) for k in _COUNTERS}
     for rec in _iter_records():
@@ -199,6 +216,9 @@ def summary():
         if not rec.get("ok"):
             r["failed"] += 1
             total["failed"] += 1
+        if str(rec.get("finish_reason") or "") == "length":
+            r["truncated"] += 1
+            total["truncated"] += 1
         u = rec.get("usage") or {}
         details = u.get("completion_tokens_details") or {}
         pairs = (("prompt_tokens", "prompt"), ("completion_tokens", "completion"),
@@ -222,14 +242,16 @@ def _main():
         print("（还没有记录 —— 跑一次生成就有了）")
         return
     rows, total = summary()
-    print(f"{'用途':<12}{'调用':>6}{'回放':>6}{'失败':>6}{'耗时(s)':>10}"
+    print(f"{'用途':<12}{'调用':>6}{'回放':>6}{'失败':>6}{'截断':>6}{'耗时(s)':>10}"
           f"{'输入tok':>10}{'输出tok':>10}{'其中思考tok':>13}{'缓存命中tok':>13}")
     for p in sorted(rows):
         r = rows[p]
         print(f"{p:<12}{r['calls']:>6}{r['replayed']:>6}{r['failed']:>6}"
+              f"{r['truncated']:>6}"
               f"{r['seconds']:>10.1f}{r['prompt']:>10}{r['completion']:>10}"
               f"{r['thinking']:>13}{r['cache_hit']:>13}")
     print(f"{'合计':<12}{total['calls']:>6}{total['replayed']:>6}{total['failed']:>6}"
+          f"{total['truncated']:>6}"
           f"{total['seconds']:>10.1f}{total['prompt']:>10}{total['completion']:>10}"
           f"{total['thinking']:>13}{total['cache_hit']:>13}")
     if total["replayed"]:
@@ -239,6 +261,37 @@ def _main():
         print(f"思考 token 占输出 token 的 {share:.0f}% —— 开了深度思考的模型，"
               f"这一项通常是大头（也因此 max_tokens 必须给足，"
               f"否则思考会把预算吃光、正文一个字都出不来）。")
+    if total["truncated"]:
+        print(f"\n⚠️ 有 {total['truncated']} 次被 max_tokens 截断（finish_reason=length）："
+              f"思考把 token 预算吃光了，正文是残的。这是**硬上限**，"
+              f"不是模型自己不想说了 —— 把 max_tokens 调大才能根治。")
+    else:
+        print("\n没有任何一次被截断（finish_reason 全是 stop）——"
+              "也就是说，思考在哪停、停多长，是模型自己决定的，不是我们的 max_tokens 卡的。")
+
+    # 再扫一遍：算"输出 token 峰值占了 max_tokens 的百分之几"。
+    # 这一个比值直接回答"要不要调大上限" —— 不接近 100%，调大不会有任何变化。
+    peak, limits = 0, set()
+    for rec in _iter_records():
+        v = (rec.get("usage") or {}).get("completion_tokens")
+        if isinstance(v, (int, float)):
+            peak = max(peak, int(v))
+        try:
+            mt = int(rec.get("max_tokens") or 0)
+        except (TypeError, ValueError):
+            mt = 0
+        if mt:
+            limits.add(mt)
+    if peak and limits:
+        lim = max(limits)
+        pct = peak / lim * 100
+        print(f"\n输出 tok 峰值 {peak}，用过的 max_tokens: {sorted(limits)}"
+              f"（按最大一档 {lim} 算，占用 {pct:.0f}%）")
+        if pct >= 95:
+            print("⚠️ 峰值已经贴着上限了 —— 这时把 max_tokens 调大才是有效的。")
+        else:
+            print(f"离上限还有 {(1 - pct / 100) * 100:.0f}% 的余量 —— "
+                  f"回复是模型自己收的尾，调大 max_tokens 不会改变任何东西。")
     print("\n注：prompt_cache_hit_tokens 是厂商侧的上下文缓存命中量，"
           "DeepSeek 这类厂商按更低单价计费，它越大越省。")
 

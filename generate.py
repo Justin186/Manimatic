@@ -72,7 +72,8 @@ def render_parallel(sb, name, args, use_latex, quality_dir):
         (ok: bool, elapsed: float)
     """
     parts = renderer.render_split(sb, use_latex=use_latex,
-                                  cn_font=args.font, fast=args.fast)
+                                  cn_font=args.font, latin_font=args.latin_font,
+                                  fast=args.fast)
     parts_dir = os.path.join(OUTPUT, "_parts", name)
     # 产物固定放在这里，与 --jobs 无关 —— 增量缓存的判断路径必须稳定
     seg_root = os.path.join(parts_dir, "segments")
@@ -235,6 +236,9 @@ def main():
                          "720p15 与 480p15 几乎一样快，720p30 才明显变慢")
     ap.add_argument("--font", default="STZhongsong",
                     help="中文字体（STZhongsong=华文中宋 / KaiTi=楷体 / Microsoft YaHei=雅黑）")
+    ap.add_argument("--latin-font", default="Times New Roman",
+                    help="数字/字母的字体（默认 Times New Roman=新罗马体）。"
+                         "与 --font 分开：中文字体自带的西文字形不会被 Pango 替换掉")
 
     # ---- LLM 接入：题目 → 分镜 JSON（不给就是原来的"手写 JSON"路径）----
     ap.add_argument("--problem", default="",
@@ -358,6 +362,13 @@ def main():
         raw = res["raw"]
     else:
         # 1b. 手写 JSON 路径
+        #
+        # ⚠️ `--name` 在这一支以前被**静默忽略**（下面那句 `name = name or 文件名` 只在
+        # LLM 分支赋过值）。后果很具体：想把一份分镜重渲回**它自己的 task 目录**
+        # （前端卡片就指那儿）时，输出名只能取文件名 —— 于是必须先把 JSON 复制成
+        # `<task名>.json` 才能落到对的地方。`--name` 的帮助文本写的是"输出文件名前缀"，
+        # 那就该在两条分支都生效。
+        name = args.name
         path = args.storyboard
         if not os.path.exists(path):
             path = os.path.join(HERE, "examples", os.path.basename(args.storyboard))
@@ -416,10 +427,12 @@ def main():
     # 比"一个 Scene 演到底 + manim 原生分段"慢 20%+。
     if args.split:
         renderer.render_to_file(sb, py_path, use_latex=use_latex,
-                                cn_font=args.font, fast=args.fast)
+                                cn_font=args.font, latin_font=args.latin_font,
+                                fast=args.fast)
     else:
         renderer.render_to_file(sb, py_path, use_latex=use_latex,
-                                cn_font=args.font, fast=args.fast,
+                                cn_font=args.font, latin_font=args.latin_font,
+                                fast=args.fast,
                                 sections=len(sb["scenes"]) > 1)
 
     n_lines = sum(1 for _ in open(py_path, encoding="utf-8"))

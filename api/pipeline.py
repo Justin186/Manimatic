@@ -271,6 +271,7 @@ def iter_full(name, raw, cancel=None):
     # 只有一个分镜时不开分段：分段只是多付一次合并开销，而"渲好一段播一段"没有意义。
     try:
         src = renderer.render(sb, use_latex=use_latex, cn_font=config.CN_FONT,
+                              latin_font=config.LATIN_FONT,
                               fast=config.FAST, sections=n > 1)
     except SyntaxError as e:
         # 生成的代码语法错 = 渲染器的 bug，不是分镜的问题（闸 4）
@@ -401,6 +402,7 @@ def iter_incremental(name, raw, emit_indices, cancel=None):
 
     try:
         parts = renderer.render_split(sb, use_latex=use_latex, cn_font=config.CN_FONT,
+                                      latin_font=config.LATIN_FONT,
                                       fast=config.FAST)
     except SyntaxError as e:
         yield events.error(f"生成的 Manim 代码有语法错误（渲染器 bug）：{e}", scope="task")

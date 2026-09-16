@@ -8,7 +8,10 @@ Manimatic 后端服务入口。
 
 前端切到真后端（web/.env.local，组件一行不用改）：
     NEXT_PUBLIC_USE_MOCK=false
-    NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
+    NEXT_PUBLIC_API_BASE_URL=/msb     # 同源前缀，由 Next 转发到本服务（web/next.config.ts）
+
+**本服务不必对外监听**：局域网用的人访问的是 Next 的 3000 端口，API 与视频都由
+Next 在同一台机器上转发过来。要改这一点，就改 web/next.config.ts 里的 BACKEND。
 
 启动时自检一次环境（LaTeX / ffmpeg / LLM 密钥），把结论打进日志 ——
 这四样里少任何一样都会在渲染时才炸，而那时用户已经在等视频了。
