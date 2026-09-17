@@ -1,0 +1,88 @@
+{
+  "title": "旋转抛物面 z = x² + y²",
+  "problem_type": "function_analysis",
+
+  "_note": "三维最小闭环的验收样例：three_axes + surface + space_curve + rotate_camera，第二镜用 carry 承接坐标系与曲面（分镜边界不清屏）。手工写、不走 LLM，用来验证引擎侧真的能把 3D 渲出来。",
+
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 8.1,
+      "_note": "建立空间坐标系 → 写出方程 → 曲面淡入 → 转视角看形状。曲面的 u/v 与 z_range 是配套的：z 最大 1.7²+1.7²≈5.78，落在 z_range [-1,6] 内（超了会被校验层拦下）。",
+      "elements": [
+        {
+          "id": "ax3",
+          "kind": "three_axes",
+          "x_range": [-3, 3, 1],
+          "y_range": [-3, 3, 1],
+          "z_range": [-1, 6, 1],
+          "x_length": 4.6,
+          "y_length": 4.6,
+          "z_length": 3.2,
+          "phi": 68,
+          "theta": -48
+        },
+        {
+          "id": "eq",
+          "kind": "formula",
+          "content": "z = x^2 + y^2",
+          "font_size": 36,
+          "color": "ACCENT",
+          "place": [{ "corner": "ur", "buff": 1.0 }]
+        },
+        {
+          "id": "s",
+          "kind": "surface",
+          "axes": "ax3",
+          "expr": "x**2 + y**2",
+          "u_range": [-1.7, 1.7, 0.2],
+          "v_range": [-1.7, 1.7, 0.2],
+          "color": "PRIMARY",
+          "opacity": 0.85
+        }
+      ],
+      "timeline": [
+        { "do": "create", "target": "ax3", "run_time": 2.0 },
+        { "do": "write", "target": "eq", "run_time": 1.2 },
+        { "do": "fade_in", "target": "s", "run_time": 1.5 },
+        { "do": "rotate_camera", "theta": -10, "phi": 55, "run_time": 3.0 },
+        { "do": "wait", "time": 0.4 }
+      ]
+    },
+
+    {
+      "id": 2,
+      "duration": 6.2,
+      "_note": "承接坐标系和曲面，在 y=0 平面里画一条落在曲面上的截线（抛物线），再转到正侧面看它",
+      "elements": [
+        { "id": "ax3", "carry": true },
+        { "id": "s", "carry": true },
+        {
+          "id": "c",
+          "kind": "space_curve",
+          "axes": "ax3",
+          "fx": "t",
+          "fy": "0",
+          "fz": "t**2",
+          "t_range": [-1.9, 1.9, 0.05],
+          "color": "YELLOW",
+          "stroke_width": 4.0
+        },
+        {
+          "id": "lab",
+          "kind": "text",
+          "content": "y = 0 截出的是一条抛物线",
+          "font_size": 28,
+          "color": "YELLOW",
+          "place": [{ "corner": "dr", "buff": 1.0 }]
+        }
+      ],
+      "timeline": [
+        { "do": "create", "target": "c", "run_time": 1.5 },
+        { "do": "write", "target": "lab", "run_time": 1.2 },
+        { "do": "rotate_camera", "theta": -78, "phi": 76, "run_time": 3.0 },
+        { "do": "wait", "time": 0.5 }
+      ]
+    }
+  ]
+}

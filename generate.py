@@ -272,6 +272,10 @@ def main():
                     help="打印最近一次留档的模型回复原文（拿来手工取分镜 JSON 最方便）")
     ap.add_argument("--llm-stats", action="store_true",
                     help="统计 LLM 留档：各用途调用次数 / 耗时 / token")
+    ap.add_argument("--dump-prompt", nargs="?", const="", default=None, metavar="文件",
+                    help="把模型实际收到的提示词导出成一份可读文档"
+                         "（默认 output/prompt_dump.md），只看不跑：不调模型、不渲染。"
+                         "配合 --problem / --rules / --profile 可看出不同设置下的差别")
     ap.add_argument("--name", default="",
                     help="输出文件名前缀（LLM 模式默认按时间戳命名）")
     args = ap.parse_args()
@@ -295,6 +299,39 @@ def main():
 
     if args.spec:
         print(dsl.describe())
+        return 0
+
+    # 把"模型实际收到的提示词"导出成文档：**只看不跑**，不调模型、不渲染。
+    # ⚠️ 导出的是与真实调用**同一批函数**的产物（build_system_prompt /
+    # build_user_prompt_multi / dsl.describe），不是另写一份说明 ——
+    # 说明和真实提示词一旦分家，这份文档就变成了"看着像、其实不是"的静默失效。
+    if args.dump_prompt is not None:
+        problem = (args.problem or "").strip()
+        if args.problem_file:
+            if not os.path.exists(args.problem_file):
+                print(f"[FAIL] 找不到题目文件: {args.problem_file}")
+                return 1
+            with open(args.problem_file, "r", encoding="utf-8") as f:
+                problem = f.read().strip()
+        cfg, cfg_err = None, ""
+        try:
+            cfg = llm.resolve_config(
+                provider=args.provider, model=args.model, base_url=args.base_url,
+                api_key=args.api_key, temperature=args.temperature,
+                max_tokens=args.max_tokens or None,
+                profile=args.profile or None)
+        except llm.LLMError as e:
+            # 没配密钥/配置写坏了也要能导出：配置只用来在文档里写清"用的是哪个模型"，
+            # 拿不到就照实写进文档 —— 不能因为"看提示词"之外的失败让这件事做不成。
+            cfg_err = str(e)
+        text = llm.dump_prompt_text(problem=problem, extra_rules=args.rules,
+                                    cfg=cfg, cfg_error=cfg_err)
+        path = args.dump_prompt.strip() or os.path.join(OUTPUT, "prompt_dump.md")
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"提示词已导出（{len(text)} 字符）: {os.path.abspath(path)}")
+        print("      这份文档就是模型真实收到的内容（含出错重试时会追加的消息）。")
         return 0
 
     # 题目来源：--problem / --problem-file。给了就走 LLM 生成分镜。

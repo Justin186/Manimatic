@@ -38,7 +38,7 @@ USE_LATEX = {use_latex}
 {helper}
 
 
-class StoryboardScene(Scene):
+class StoryboardScene({scene_base}):
     """
     分镜场景。带一个可选的"边渲边切"能力（SECTIONS=True 时启用）。
 
@@ -248,6 +248,9 @@ def render(storyboard: dict,
     # 一个 Scene 演到底：承接元素靠"共用同一个 construct() 作用域"活下来
     env = _prepare_env(use_latex, fast, carry_mode="reuse")
     scenes = storyboard["scenes"]
+    # 含三维元素/相机动作 → 换成 ThreeDScene（相机能转）。
+    # 纯 2D 分镜仍然是 Scene —— 生成源码**逐字节不变**，增量渲染的缓存判据不受影响。
+    scene_base = "ThreeDScene" if dsl.needs_3d(storyboard) else "Scene"
 
     blocks = []
     for idx, sc in enumerate(scenes):
@@ -266,6 +269,7 @@ def render(storyboard: dict,
         cn_font=cn_font,
         latin_font=latin_font,
         helper=dsl.RUNTIME_HELPER,
+        scene_base=scene_base,
         sections_flag=sections,
         sections_total=len(scenes),
         body="\n".join(blocks),
@@ -315,6 +319,9 @@ def render_split(storyboard: dict,
     # 每个分镜都是独立文件、独立 Scene：承接元素只能重建 + 立刻 add
     env = _prepare_env(use_latex, fast, carry_mode="rebuild")
     scenes = storyboard["scenes"]
+    # 拆分渲染时每个文件只含一个分镜，但 **carry 存根里没有 kind**，
+    # 单看那一镜认不出它是三维元素 —— 所以按整份判断（见 dsl.needs_3d 的说明）。
+    scene_base = "ThreeDScene" if dsl.needs_3d(storyboard) else "Scene"
     out = []
     for idx, sc in enumerate(scenes):
         code, label = _scene_code(sc, env)
@@ -338,6 +345,7 @@ def render_split(storyboard: dict,
             #    从写下那天起就是坏的（默认路径不走 render_split，所以一直没暴露）。
             sections_flag=False,
             sections_total=0,
+            scene_base=scene_base,
             body=f"        # ---- {label} ----\n" + code,
         )
         _check_syntax(src)

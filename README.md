@@ -390,20 +390,29 @@ D:\Manimatic\
 
 一个 tracker 同时驱动动点、切线和斜率数字 —— 这是旧模板做不到的联动。
 
-**元素库 26 种**：`text` `formula` `axes` `number_plane` `plot` `parametric` `area`
-`riemann` `dot` `line` `arrow` `circle` `ellipse` `rect` `polygon` `angle` `brace`
-`table` `cell_box` `legend` `highlight` `tangent_line` `normal_line` `number` `tracker` `group`
+**元素库 29 种**：`text` `formula` `axes` `three_axes` `number_plane` `plot` `parametric`
+`area` `riemann` `surface` `space_curve` `dot` `line` `arrow` `circle` `ellipse` `rect`
+`polygon` `angle` `brace` `table` `cell_box` `legend` `highlight` `tangent_line`
+`normal_line` `number` `tracker` `group`
 
-**动作库 30 种**：`create` `write` `fade_in` `grow` `draw_border` `show` `transform`
+**动作库 31 种**：`create` `write` `fade_in` `grow` `draw_border` `show` `transform`
 `replace` `indicate` `circumscribe` `flash` `wiggle` `focus` `fade_out` `remove`
 `shift` `move_to` `move_cells` `scale` `rotate` `set_color` `set_opacity` `set_stroke` `stretch`
-`move_along` `trace` `tracker_to` `wait` `clear_all` `parallel`
+`move_along` `trace` `tracker_to` `rotate_camera` `wait` `clear_all` `parallel`
+
+**三维（2026-09-17 接入）**：`three_axes` 空间坐标系 + `surface`（z=f(x,y)）+ `space_curve`
+（参数曲线）+ `rotate_camera`（转视角）。含三维元素的分镜自动继承 `ThreeDScene`
+（纯 2D 分镜仍是 `Scene`，生成源码逐字节不变，增量渲染缓存不受影响）；
+写了 `place` 的文字/公式自动当"屏幕字幕"固定在画面上，不随视角转。
+验收样例见 `examples/f1_space_surface.json`。
 
 完整规格不用手写 —— `storyboard/dsl.py` 里 `ELEMENT_SPEC` / `ACTION_SPEC` 一份定义，
 校验和文档都从它生成：
 
 ```bash
-python generate.py --spec          # 打印给大模型看的 DSL 规格，直接塞进 prompt
+python generate.py --spec              # 打印给大模型看的 DSL 规格，直接塞进 prompt
+python generate.py --dump-prompt       # 导出模型**实际收到**的完整提示词（含示例与重试消息）
+                                       # → output/prompt_dump.md，只看不跑、不调模型
 ```
 
 ### 同一位置换内容：`replace` 的四种过渡

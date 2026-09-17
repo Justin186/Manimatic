@@ -1229,12 +1229,37 @@ def build_system_prompt(extra_rules=""):
         "**你输出的不是 Manim 代码**，而是一套小写下划线的 DSL —— 两者的名字是"
         "**故意错开**的，别把 Manim 的类名搬过来。",
         "",
+        # ⚠️ 这一节的基调是「成本不是你的约束，别为了快牺牲画面」（2026-09-16 改）。
+        # 原来两句都是成本警告（动态元素贵、公式贵），模型读到会本能地少做动态、少写公式，
+        # 而这两样恰恰是画面质量的主要来源。旧说法在**当时**也不算错，但现在已不成立：
+        # LaTeX 走了批处理预热（tex_batch：24 个公式逐个编译 18.5s → 一次 0.9s，默认开启），
+        # 静态公式与刻度数字都便宜了；而 DSL 里公式内容本就是固定字符串，
+        # 「每帧在变」的数值由 number 元素承担，那条路有专门的廉价实现（建一次 + 只更新值）。
+        # 结论：**把省时间的念头从模型脑子里拿掉，让它按"这道题该怎么讲"来设计画面。**
         "几条帮你取舍的常识：",
-        "- 含 `$tracker` 引用（或 `live: true`）的元素每帧都要重建，"
-        "**代价远高于静态元素**，一个分镜里别放一堆。",
-        "- 公式要经过 LaTeX 编译，**重复变化的公式尤其贵**；能写成普通文字就别写成公式。",
-        "- 元素库里没有 3D、shader、交互、外部图片/视频，也没有镜头运镜。"
-        "这类画面设计不出来 —— 别往那个方向想。",
+        "- **渲染慢一点没关系，画面质量优先。** 不要为了省时间去砍动作、把该动的画成静止的，"
+        "或把公式降级成大白话 —— 出片多花几十秒不是问题，画面对不上题才是问题。",
+        "- **鼓励动态**：含 `$tracker` 引用（或 `live: true`）的元素每帧都会重算，"
+        "比静态元素慢，但这是**特点、不是缺点** —— 「变化 / 联动 / 累积」这类内容"
+        "就该让关键的量真的动起来。一镜里同时有两三个动态元素是正常的，不必回避。",
+        "- **公式随便用**：`formula`、`text` 里的 `$...$` 混排、坐标轴刻度都已经做了批量"
+        "预处理，不用替编译时间操心，也不要为了省事把公式写成普通文字。",
+        # ⚠️ 2026-09-16 改：原文是"元素库里没有 3D、shader、交互、外部图片/视频，
+        # 也没有镜头运镜。这类画面设计不出来" —— 把两层意思混成了一句。
+        # 事实核对（对着装着的 manim 0.21 看的）：**Manim 本身 3D 一应俱全**
+        # （ThreeDAxes、Surface、Sphere、Cube/Prism、Cone、Cylinder、Line3D/Arrow3D、
+        # Torus、Polyhedron 系列，以及 ThreeDScene 的 set_camera_orientation /
+        # move_camera / 环境自转），外部图片也有 ImageMobject。
+        # 真正没有的是**我们这套引擎**：元素表里一个 3D kind 都没有，生成的场景类也是
+        # 普通 `Scene`（renderer.HEADER），所以模型**输出不出来**。
+        # 对模型的约束一个字没变，但表述必须说准：**"做不到"和"我们还没做"是两件事** ——
+        # 混在一句里，读的人（包括以后的我们自己）会误判能力边界，甚至据此否掉本该能做的题。
+        "- kind 只能从下面规格里挑。**三维已经支持**：`three_axes`（空间坐标系）+ "
+        "`surface`（曲面 z=f(x,y)）/ `space_curve`（空间曲线）+ `rotate_camera`（转视角）。"
+        "立体几何、空间曲面、二重积分这类内容就该真的把它立起来讲，比画三视图直观得多。"
+        "但**别默认上 3D**：平面几何、函数图像、代数变形这些题目摆一个空间坐标系只会绕远路。",
+        "- 还没有的能力：三维之外的相机运镜、交互、外部图片/视频。"
+        "这类东西**不要**自己造 kind 去凑，那一定生成失败。",
         "",
         "## 输出格式（最重要）",
         "只输出一个 JSON 对象。不要 Markdown 围栏、不要任何解释文字、不要注释。",
@@ -1248,7 +1273,8 @@ def build_system_prompt(extra_rules=""):
         "**键的顺序必须严格照下面的来，尤其 brief 必须是第一个键，不要调整**"
         "（前端靠这个顺序做到「1~2 秒就有字可显示」）：",
         "{",
-        '  "brief": "先用 2~3 句话直接回答这道题（讲人话，不要客套话，不要双引号，300 字以内）",',
+        '  "brief": "先用 2~3 句话直接回答这道题（讲人话、不要空话套话、不要双引号、300 字以内；'
+        '追问轮见下面规则 4：先说清这一轮改了什么，不要复述上一轮）",',
         '  "intent": "propose",',
         '  "outline": [ {"id": 1, "title": "分镜标题", "durationSec": 9, "summary": "这一镜讲什么"} ],',
         '  "title": "整个讲解的标题",',
@@ -1265,7 +1291,37 @@ def build_system_prompt(extra_rules=""):
         "不要为了凑动画硬造分镜。",
         "3. brief 是「不看视频也能看懂」的那段话：给出结论和关键一步，"
         "不要写成「下面我用动画演示一下」这类空话。**它不能为空** —— 纯问答时它就是全部回答。",
-        "4. title、outline 的 title / summary 都是给中文用户看的，写中文，别太长。",
+        # ⚠️ 2026-09-17 加（用户反馈）：多轮里第二轮的 brief 和第一轮几乎重复，
+        # 读起来像"没听懂要求"。根因是当时的规则只有"直接回答这道题"这一条 ——
+        # 模型在「用视频讲一下、给无基础的人」这类**修改要求**的追问轮里，
+        # 会把上一轮的答案原样再讲一遍（契约上没错，体验上完全错）。
+        # 这一条把"追问轮该说什么"补上。
+        "4. ⚠️ **如果对话历史里已经有你上一轮的回答（说明这次是追问，或要求修改讲法/画面），"
+        "brief 要先用一句话说清「这一轮改了什么、接下来怎么讲」，不要再把上一轮的内容复述一遍。**"
+        "例：「好的，我换成零基础的口径，并把「割线趋近切线」这个过程拆成 3 个分镜："
+        "先算平均变化率，再让第二个点贴过去，最后给出导数的定义。」"
+        "（用户问的是**新问题**、不是要求修改时，直接回答新问题。）",
+        "5. title、outline 的 title / summary 都是给中文用户看的，写中文，别太长。",
+        # 2026-09-17 加：多轮"改一版"的行为准则。
+        # 模型能看到的历史里带着**它自己历次输出的分镜 JSON**（见 _history_with_storyboards），
+        # 所以这里要说清"拿到那些 JSON 该怎么办" —— 否则它会当成参考资料，而不是"这就是当前这一版"。
+        "6. **历史里你自己输出的分镜 JSON，就是当前这一版的画面**（多轮改一版全靠它）：",
+        "   · 用户这次是在**改那一版**（「第 2 镜讲慢点」「换成蓝色」「别用坐标系」）→ "
+        "**只改他点名的地方**。没被点名的分镜要**照着你上一版的 JSON 原样保留**："
+        "`id` / `duration` / `elements` / `timeline` 逐项一致，"
+        "**连坐标、颜色、文字内容都不要动**（全文就在你手里，直接抄）。"
+        "顺手优化、顺手统一风格都算越界 —— 用户会觉得「我调好的东西又乱了」。"
+        "改了哪几镜，brief 里就点明是哪几镜（配合规则 4）。",
+        "   · **即使被校验打回重做，也只修被拒的那一处**，不要借机改动别的地方"
+        "（反馈语里的「没有报错的部分保持你原来的设计」就是这个意思）。",
+        # ⚠️ 2026-09-17：用户提过"同一个会话里经常问不同的题，前后两个视频可以完全无关"，
+        # 所以**不能有"偏向保留"的默认**（原来写的是"拿不准时按改上一版处理"，已改）——
+        # 把新题误当修改（新视频带着旧骨架）比把修改误当新题（重做一版、题目不变）更坏。
+        "   · 用户这次提的是**另一道题** → 正常做一份新的。判据就是**用户这一句话本身**："
+        "像一道完整的题目（自带题面）→ 当新题做，前后两版毫无关系也完全正常 —— "
+        "同一段对话里问几道不同的题是常事，**不要为了「接得上」硬留上一版的元素**；"
+        "像一句针对画面的改动要求（通常很短、并提到上一版的某个具体东西）→ 按改上一版处理，"
+        "并在 brief 里说明这一轮改了什么。",
         "",
         "## 红线（违反会被校验层拒绝，你会一次收到**全部**错误，请一次改完）",
         "1. 你不写任何代码。元素类型（kind）和动作（do）**只认下面规格里列出的名字**"
@@ -1383,11 +1439,48 @@ def build_system_prompt(extra_rules=""):
 #      从中间切断会出现"assistant 的回答没有对应的提问"，模型会开始胡乱猜测。
 #   3. **保留最近 N 轮**作为下限，保证再怎么裁都能接上话。
 #
+# 预算给多大（2026-09-17：6000 → 20000 → 最终 10000）
+# ------------------------------------------------------------------------------
+# 6000 是当初拍的，没有实测依据；而 `/api/chat` 的《工作手册》已经是
+# **22000 字符**（每轮固定发）—— 也就是说历史预算只有固定开销的 ~27%：
+# 聊到十几轮就开始丢最早的内容，用户的感受就是"它记不住"。
+# 中间试过 20000，实测输入从 14.5k 涨到 20k token **耗时不变**（3.5s vs 3.1s，
+# 噪声内），所以"多发历史会变慢"这件事本身不成立 —— 贵的是 token 账单，不是等待。
+#
+# 最终定在 **10000**：分镜 JSON 进历史之后每轮约 1630 token（见
+# `_history_with_storyboards`），10000 够**5~6 轮**带画面的对话，
+# 覆盖绝大多数"改一版"的来回，同时比 20000 省约 40% 输入 token。
+# 想更长：`set MSB_HISTORY_TOKENS=30000`（见 history_budget()），不用改代码。
+#
+# ⚠️ 这里数的是**输入历史**：思考（reasoning）不进历史、也不占这个预算 ——
+#    它和正文共用的是输出侧的 max_tokens（见 HANDOFF §8.11 / §8.35）。
+#
 # token 只能估：中文约 1 字 ≈ 1 token、英文约 4 字符 ≈ 1 token。
 # 精确计数要引第三方库，而这里只需要"别把上下文撑爆"，粗估足够 ——
 # 估高一点（偏保守）比估低好。
-_HISTORY_TOKEN_BUDGET = 6000
+_HISTORY_TOKEN_BUDGET = 10000
 _HISTORY_MIN_TURNS = 4
+
+
+def history_budget():
+    """
+    历史预算（token）。默认取 `_HISTORY_TOKEN_BUDGET`，可用 `MSB_HISTORY_TOKENS` 覆盖。
+
+    为什么留这个口子：这个数直接决定"能聊多少轮"和"每轮多花多少输入 token"，
+    属于**该按实测调、不该写死**的参数。做成环境变量，扫档位就不用改代码。
+    写坏了（非数字 / 非正数）只打 WARN 并回退默认值 —— 配置错误不该让服务起不来。
+    """
+    v = _first_env(("MSB_HISTORY_TOKENS",))
+    if v:
+        try:
+            n = int(float(v))
+            if n > 0:
+                return n
+            raise ValueError("必须是正数")
+        except ValueError as e:
+            print(f"      [WARN] MSB_HISTORY_TOKENS={v!r} 无效（{e}），"
+                  f"回退默认 {_HISTORY_TOKEN_BUDGET}")
+    return _HISTORY_TOKEN_BUDGET
 
 
 def _est_tokens(text):
@@ -1397,14 +1490,20 @@ def _est_tokens(text):
     return cjk + max(0, len(s) - cjk) // 4
 
 
-def trim_history(history, budget=_HISTORY_TOKEN_BUDGET, min_turns=_HISTORY_MIN_TURNS):
+def trim_history(history, budget=None, min_turns=_HISTORY_MIN_TURNS):
     """
     history 是 [{"role": "user"|"assistant", "content": str}, ...]（按时间正序）。
     返回裁剪后的列表：**从最旧的开始丢**，并保证切在"用户"这条边界上。
 
+    Args:
+        budget: 历史预算（token 估值）。**None = 用 `history_budget()`**
+            （默认 10000，可被 `MSB_HISTORY_TOKENS` 覆盖）。显式传值只影响这一次调用。
+
     为什么必须有 min_turns：极端情况下（用户一次贴了篇论文）预算会被一条消息吃光，
     裁完剩个空列表，模型就彻底失忆了 —— 那还不如不管预算、至少留着最近几轮。
     """
+    if budget is None:
+        budget = history_budget()
     items = [h for h in (history or [])
              if isinstance(h, dict) and h.get("role") in ("user", "assistant")
              and str(h.get("content") or "").strip()]
@@ -1429,6 +1528,88 @@ def trim_history(history, budget=_HISTORY_TOKEN_BUDGET, min_turns=_HISTORY_MIN_T
     return kept
 
 
+def _history_with_storyboards(history):
+    """
+    消息记录 → 真正发给模型的 messages：**assistant 的内容 = brief + 它那一轮输出的分镜 JSON**。
+
+    为什么要这样（2026-09-17，用户要求"把 json 也当作模型的对话输出"）：
+    多轮改一版时，模型得看得到自己上一版**具体写了什么** —— 坐标、颜色、文字内容全在 JSON 里。
+    只看 brief 的话它没有可照抄的原料：实测症状是"用户只让改第 2 镜，它顺手把第 3、4 镜也
+    重写了"。那不是越界，是**手里没有原料**。（先试过一版"压成每镜一行的摘要"，结构级够用、
+    细节级不够 —— 摘要里没有参数，模型只能重写。）
+    把 JSON 放进它**自己的历史消息**里，等于"它说过的话"：多轮天然连续，
+    也不局限只带上一版（要哪一版都在上下文里，由 token 预算裁剪）。
+
+    JSON 存在记录的 `meta.storyboard`、**不是 `content`**：
+      · `content` 是给人看的（前端聊天框显示的就是它），塞 JSON 进去会污染界面；
+      · "模型该看到的"和"界面该显示的"本来就是两件事。
+    没有 storyboard 的记录（纯文字回答、2026-09-17 之前的旧记录）原样返回 ——
+    老会话一个字都不受影响。
+
+    ⚠️ 代价是量过的：一份 JSON 中位 **1463 token**（49 份实测，最大 2776），
+    每轮从 ~360 涨到 ~1630 —— 默认预算 10000 下能留住约 **6 轮**带画面的对话
+    （20000 时约 12 轮，要更长就调 `MSB_HISTORY_TOKENS`）。
+    """
+    out = []
+    for h in history or []:
+        if not isinstance(h, dict):
+            continue
+        role, content = h.get("role"), h.get("content")
+        raw = None
+        if role == "assistant" and isinstance(h.get("meta"), dict):
+            raw = h["meta"].get("storyboard")
+        if isinstance(raw, dict) and raw.get("scenes"):
+            content = (str(content or "").rstrip()
+                       + "\n\n【这一轮产出的分镜 JSON】\n```json\n"
+                       + json.dumps(raw, ensure_ascii=False) + "\n```")
+        out.append({"role": role, "content": content})
+    return out
+
+
+def diff_scenes(prev_raw, new_raw):
+    """
+    逐镜对比两份分镜的"结构"，返回变化说明列表（空 = 结构完全一致）。
+
+    用来回答一个很实际的问题：**用户只让改第 2 镜，模型有没有顺手改别的？**
+    2026-09-17 实测（拿 examples/free_pythagorean.json 当上一版、让它"第 2 镜讲慢一点"）：
+    目标镜把时长从 9 秒拉到 12 秒（对），但第 3、4 镜也被动了（第一次尝试把图例写错、
+    被校验打回后连别的镜一起改了）。提示词已经加了"没被点名的分镜逐项一致"，
+    但**提示词管不住的东西要能看见** —— 这个函数就是那条视线。
+
+    ⚠️ 只做**只读对比**，不拦截、不改写：模型有权为了修校验错误调整别的分镜
+    （比如引用完整性要求它改），硬拦会把正确的输出拒掉。调用方拿它打 WARN 即可。
+    """
+    def shape(raw):
+        out = {}
+        for i, sc in enumerate((raw or {}).get("scenes") or [], 1):
+            if not isinstance(sc, dict):
+                continue
+            kinds = tuple(sorted({str(el.get("kind")) for el in (sc.get("elements") or [])
+                                  if isinstance(el, dict) and el.get("kind")}))
+            acts = tuple(str(ac.get("do")) for ac in (sc.get("timeline") or [])
+                         if isinstance(ac, dict) and ac.get("do"))
+            out[sc.get("id", i)] = (sc.get("duration"), kinds, acts)
+        return out
+
+    a, b = shape(prev_raw), shape(new_raw)
+    msgs = []
+    for sid in sorted(set(a) | set(b), key=lambda x: str(x)):
+        if sid not in a or sid not in b:
+            msgs.append(f"分镜 {sid}：{'新增' if sid not in a else '被删掉了'}")
+            continue
+        if a[sid] == b[sid]:
+            continue
+        parts = []
+        if a[sid][0] != b[sid][0]:
+            parts.append(f"时长 {a[sid][0]}→{b[sid][0]}")
+        if a[sid][1] != b[sid][1]:
+            parts.append(f"元素 {list(a[sid][1])}→{list(b[sid][1])}")
+        if a[sid][2] != b[sid][2]:
+            parts.append("动作序列有变")
+        msgs.append(f"分镜 {sid}：" + "、".join(parts))
+    return msgs
+
+
 def build_user_prompt_multi(problem, history=None):
     """
     有历史时的 user prompt。
@@ -1438,6 +1619,15 @@ def build_user_prompt_multi(problem, history=None):
     我们实测踩过这个坑（用户先问傅里叶变换，再说"生成对应视频"，模型回：
     「这次只收到了一句指令，没有附带任何题干……」）。历史给全了再加这一句，
     它才会去做指代消解。
+
+    Args:
+        history: 之前的对话记录。**带 `meta.storyboard` 的 assistant 记录会被还原成
+            "brief + 分镜 JSON"**（见 `_history_with_storyboards`）——
+            多轮"改这一版"靠的就是模型能看到自己上一版写的是什么。
+
+    ⚠️ 历史是**只追加**的：前缀缓存按"前缀逐字相同"生效，所以每轮只能在末尾接一段。
+        这也是"分镜 JSON 放进 assistant 消息"而不是"另起一段当前画面"的原因 ——
+        后者每轮内容都在变，会把历史的缓存整个打掉。
     """
     parts = []
     if history:
@@ -1449,10 +1639,11 @@ def build_user_prompt_multi(problem, history=None):
             "另外：你之前的回答里若有「请把题目发来」这类话，说明那次是缺上下文，"
             "现在已经补上了，按上文重新理解即可。\n"
         )
-    parts.append("请把下面这道题设计成分镜 JSON。\n"
+    parts.append("请按「用户这次的输入」处理：它可能是一道**新题目**，"
+                 "也可能是要**改你上一版的分镜**（判据见 system 规则 6）。\n"
                  "要求：图形与推导要真的对得上这道题，不要套模板话术。\n"
                  "只输出 JSON 对象本身。\n\n"
-                 f"---- 题目 ----\n{str(problem).strip()}")
+                 f"---- 用户这次的输入 ----\n{str(problem).strip()}")
     return "\n".join(parts)
 
 
@@ -1547,7 +1738,8 @@ def _warn_brief_order(raw, verbose=True):
 # ==============================================================================
 
 def generate_storyboard(problem, cfg, registry, max_attempts=4,
-                        json_mode=None, extra_rules="", history=None, verbose=True):
+                        json_mode=None, extra_rules="", history=None,
+                        verbose=True):
     """
     反复调用 LLM 直到产出一份**通过 schema/dsl 校验**的分镜。
 
@@ -1562,6 +1754,9 @@ def generate_storyboard(problem, cfg, registry, max_attempts=4,
             **这是多轮的基础**：不给的话模型看到的只有当前这一句，
             于是「生成对应视频」这种追问会被它当成"你没给题目"。
             长度由 trim_history() 按 token 预算裁剪，调用方不需要自己控。
+            上一版分镜**跟着 history 走**：记录里带 `meta.storyboard` 的 assistant 消息
+            会被还原成"brief + 分镜 JSON"（见 `_history_with_storyboards`），
+            于是模型看得到自己上一版具体写了什么 —— 多轮"改这一版"靠的就是这个。
         extra_rules: 附加到 system prompt 的要求
 
     Returns:
@@ -1574,7 +1769,9 @@ def generate_storyboard(problem, cfg, registry, max_attempts=4,
     Raises:
         LLMError: 次数用尽仍未通过校验，或网络/接口错误
     """
-    past = trim_history(history)
+    # 先把"带 meta.storyboard 的记录"还原成"brief + 分镜 JSON"的历史消息，
+    # 再按 token 预算裁剪 —— 顺序不能反：裁剪要看的是**真正会发出去的长度**。
+    past = trim_history(_history_with_storyboards(history))
     messages = [
         {"role": "system", "content": build_system_prompt(extra_rules)},
         *past,
@@ -1690,13 +1887,16 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
             这段空白期唯一在动的东西就是思考流 —— 前端"正在思考…"就靠它。
             **不传即丢弃**：推理内容是否该给终端用户看，是业务层的决定。
         history: 该会话之前的对话（同 generate_storyboard 的 history）。
-            **多轮追问（"生成对应视频"、'换个讲法'）靠的就是它。**
+            **多轮追问（"生成对应视频"、'换个讲法'、'第 2 镜讲慢点'）靠的就是它** ——
+            里面带着模型历次输出的分镜 JSON（见 `_history_with_storyboards`）。
         verbose: 与 generate_storyboard 一致，打印每轮耗时/错误
 
     Returns:
         同 generate_storyboard，额外多一个 "streamed": bool（首轮是否真的走了流式）
     """
-    past = trim_history(history)
+    # 先把"带 meta.storyboard 的记录"还原成"brief + 分镜 JSON"的历史消息，
+    # 再按 token 预算裁剪 —— 顺序不能反：裁剪要看的是**真正会发出去的长度**。
+    past = trim_history(_history_with_storyboards(history))
     messages = [
         {"role": "system", "content": build_system_prompt(extra_rules)},
         *past,
@@ -1970,3 +2170,208 @@ def regenerate_scene(instruction, scene, registry, cfg=None, context=None,
     raise LLMError(
         f"这个分镜连续 {max_attempts} 次都没能改对。\n最后一次的错误：{last_err}"
     )
+
+
+# ==============================================================================
+# 把提示词导出一份"给人看"的文档（generate.py --dump-prompt）
+# ==============================================================================
+#
+# 为什么要有这一段：提示词散在三处 —— 本模块手写的规则（build_system_prompt）、
+# dsl.describe() 自动生成的规格、四个 few-shot 示例。想知道"模型到底看到什么"只能读
+# 代码；而读代码的人一多就会开始**转述**，转述一定会失真（漏一段、把"建议"说成"硬性
+# 要求"）。这里把三处按**真实发送顺序**原样摆出来，一个字都不改写、一句都不手抄。
+
+# 导出时没给题目就写这个占位符。**不能留空**：空着的话读的人分不清"这里本来就没有
+# 内容"和"导出漏拿了题目"，而"分不清"正是这次要排除的东西。
+_DUMP_NO_PROBLEM = "【占位符：导出时没给 --problem；真实调用时，题目原文就在这一行】"
+
+
+def _md_headings(text):
+    """抓出提示词里的 `## ` 小节标题，拼一份目录（不然几千字只能从上往下翻）。"""
+    return [ln.strip()[3:].strip()
+            for ln in text.splitlines() if ln.strip().startswith("## ")]
+
+
+def dump_prompt_text(problem="", extra_rules="", history=None, cfg=None,
+                     cfg_error=""):
+    """
+    把「模型实际会收到的东西」拼成一份可读文档（Markdown）返回。
+
+    文档分两个区，读的时候别混：
+      【一】第一轮真实发送的      system +（会话历史）+ user —— 发出去的就是这三段
+      【二】附：出错打回重做时才追加的 —— 第一轮一个字都没有，但它们同样在影响输出
+
+    内容全部取自本模块的常量与 dsl.describe()，**没有一句是手抄的**：将来改了提示词，
+    导出的文档自动跟着变，不需要"记得同步更新文档"这种约定（同 describe() 的思路）。
+
+    Args:
+        problem: 题目原文（空则写一个明说的占位符）
+        extra_rules: 本次的附加要求（与真实调用传的是同一个参数）
+        history: 会话历史；给了就按真实顺序摆出来，没给就说明"真实调用时这里有什么"
+        cfg: resolve_config() 的结果；只用来打印"这次用的是哪个模型"，拿不到也不影响导出
+        cfg_error: 读配置失败时的原因（照实写进文档，而不是留个空栏）
+    """
+    sys_text = build_system_prompt(extra_rules)
+    # 先把"带 meta.storyboard 的记录"还原成"brief + 分镜 JSON"的历史消息，
+    # 再按 token 预算裁剪 —— 顺序不能反：裁剪要看的是**真正会发出去的长度**。
+    past = trim_history(_history_with_storyboards(history))
+    user_text = build_user_prompt_multi(problem or _DUMP_NO_PROBLEM, past)
+
+    L = []
+    add = L.append
+    add("# MathStoryboard —— 模型实际收到的提示词")
+    add("")
+    add("> 本文档由 `python generate.py --dump-prompt` 从代码里**直接导出**，"
+        "不是手抄的，也没有删改。")
+    add("")
+    add("模型每次只收到两样东西：一本每轮都要念的《工作手册》（role=system），"
+        "和这一单的要求（role=user）。下面按真实顺序摆出来。")
+    add("")
+
+    add("## 这次导出用的设置")
+    add("")
+    if cfg:
+        add(f"- 厂商 / 模型：{cfg.get('provider')} / {cfg.get('model')}")
+        add(f"- 模型档案：{cfg.get('profile') or DEFAULT_PROFILE}")
+        add(f"- temperature（随机程度，越低越稳）：{cfg.get('temperature')}")
+        add(f"- max_tokens（单次回复的长度上限）：{cfg.get('max_tokens')}")
+        add(f"- 强制 JSON 输出：{effective_json_mode(cfg, None)}"
+            "（true = 让接口保证回复是 JSON）")
+    elif cfg_error:
+        add("- ⚠️ 读配置失败（只影响这一栏，提示词内容照常导出）："
+            + cfg_error.replace("\n", " "))
+    else:
+        add("- （本次只导出了提示词正文，没有带配置）")
+    add("- 本次附加要求（extra_rules）："
+        + (extra_rules.strip().replace("\n", " / ") if extra_rules.strip() else "（没有）"))
+    add("")
+
+    add("## 体量")
+    add("")
+    add(f"- 《工作手册》（system）：{len(sys_text)} 字符")
+    add(f"- 这一单的要求（user）：{len(user_text)} 字符")
+    add(f"- 单次调用的固定开销 ≈ {len(sys_text) + len(user_text)} 字符"
+        "（会话历史、出错重试的消息再往上加）")
+    add("")
+
+    add("## 《工作手册》包含哪些小节（按出现顺序）")
+    add("")
+    for h in _md_headings(sys_text):
+        add(f"- {h}")
+    add("")
+
+    add("---")
+    add("")
+    add("# 一、第一轮真实发送的内容")
+    add("")
+    add(f"## [1/3] role = system —— 《工作手册》（{len(sys_text)} 字符）")
+    add("")
+    add("每一轮都发，内容固定；只有末尾「## 补充要求（本次调用专属）」那一节会随"
+        "前端设置变化（就是上面写的 extra_rules）。")
+    add("")
+    add("```text")
+    add(sys_text)
+    add("```")
+    add("")
+
+    add("## [2/3] 会话历史（夹在手册和这次要求之间）")
+    add("")
+    if past:
+        add(f"本次导出带了 {len(past)} 条历史（按时间正序）：")
+        add("")
+        for i, h in enumerate(past, 1):
+            add(f"- 第 {i} 条：role = {h.get('role')}，"
+                f"{len(str(h.get('content')))} 字符")
+    else:
+        add("本次导出没有带历史。真实调用时（网页端多轮对话）这里会插入这个会话里之前"
+            "的问答，位置在 system 之后、这次要求之前，按时间正序。")
+        add("")
+        add("为什么非带不可：用户第二句常常是「生成对应视频」「第三步再讲慢点」这类"
+            "**指代**，不带历史的话，模型会以为「你根本没给题目」然后反问一句废话。")
+    add("")
+
+    add(f"## [3/3] role = user —— 这一单的要求（{len(user_text)} 字符）")
+    add("")
+    add("```text")
+    add(user_text)
+    add("```")
+    add("")
+
+    add("---")
+    add("")
+    add("# 二、附：只有出错打回重做时，模型才会再多看到的消息")
+    add("")
+    add("顺利通过校验时，下面这些**一个字都不会发**。列出来是因为它们同样在影响模型"
+        "输出 —— 调提示词的时候必须连它们一起看。每次重试都会多出一对消息："
+        "「你上一轮写的东西」+「错在哪」。")
+    add("")
+
+    add("## 共用的第 1 条：把模型上一轮的输出原样回灌给它自己")
+    add("")
+    add(f"（role = assistant）上限 {_ECHO_LIMIT} 字符。超过时末尾会自动补一句"
+        f"「你的输出共 N 字符，此处只显示前 {_ECHO_LIMIT} 字符，请**完整重写**整份 JSON，"
+        "不要顺着上面的断口续写」—— 默默切一刀会让模型以为自己写完了，"
+        "然后只改错的地方，交出一份残缺的分镜。")
+    add("")
+
+    add("## 第 2 条（四种情况之一）")
+    add("")
+    add("### 情况 A：回复不是合法 JSON")
+    add("")
+    add("```text")
+    add(_FEEDBACK_JSON.replace("{err}", "（真实调用时填解析出错的位置和提示，最多 "
+                                     + str(_JSON_ERR_LIMIT) + " 字符）"))
+    add("```")
+    add("")
+    add("### 情况 B：JSON 合法，但没通过校验")
+    add("")
+    add("```text")
+    add(_FEEDBACK_SCHEMA.replace("{err}", "（真实调用时填全部错误，最多 "
+                                       + str(_ERR_LIMIT) + " 字符）"))
+    add("```")
+    add("")
+    add("### 情况 C：回复被长度上限截断（思考把预算吃光了）")
+    add("")
+    add("```text")
+    add(_FEEDBACK_TRUNCATED)
+    add("```")
+    add("")
+    add("### 情况 D：brief 缺失或为空（等于这一轮对用户毫无产出）")
+    add("")
+    add("```text")
+    add(_FEEDBACK_BRIEF)
+    add("```")
+    add("")
+    add("另外两条行为，看文档也要知道：**重试轮不再走流式**（用户已经看过一轮字，"
+        "再吐一遍只是噪音）；最多重试到 `max_attempts` 次，仍不通过就整条失败。")
+    add("")
+
+    add("---")
+    add("")
+    add("# 三、附：网页端「重做这一个分镜」用的是另一套")
+    add("")
+    add("这时 system 还是同一本《工作手册》，只在末尾追一句：")
+    add("")
+    add("```text")
+    add(_SCENE_SYSTEM_EXTRA)
+    add("```")
+    add("")
+    add("user 换成下面这个模板。下面是用**占位内容**渲染出来的样子"
+        "（调的是同一个函数，所以形状与真实调用一致）：")
+    add("")
+    add("```text")
+    add(_scene_user_prompt(
+        "（用户对这一个分镜的要求，如“第 3 步讲慢一点”）",
+        {"id": 2, "duration": 6.0,
+         "elements": ["（这个分镜现有的元素，原样 JSON）"],
+         "timeline": ["（这个分镜现有的动作，原样 JSON）"]},
+        {"title": "（整份讲解的标题）", "total": 3, "index": 2},
+        6.0))
+    add("```")
+    add("")
+
+    add("---")
+    add("")
+    add("以上就是全部 —— **没有别的隐藏提示词**。想核对真实发出去的原文（含每一轮"
+        "重试），看调用留档：" + llm_log.calls_path())
+    return "\n".join(L)

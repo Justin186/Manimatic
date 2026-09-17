@@ -46,6 +46,7 @@
       不必先声明再引用，随手造随手用。
 """
 
+import math
 import re
 
 from . import metrics
@@ -64,10 +65,38 @@ def var_name(eid):
     return _V + eid
 
 
+def needs_3d(storyboard) -> bool:
+    """
+    整份分镜里有没有用到三维（三维元素，或相机旋转动作）。
+
+    公开出来是给渲染器用的：它据此决定生成的场景继承 `Scene` 还是 `ThreeDScene`。
+    **按整份扫，不按单个分镜扫** —— 拆分渲染（render_split）时每个文件只含一个分镜，
+    而 `carry` 承接过来的是 `{"id": x, "carry": true}` 这种**没有 kind 的存根**，
+    单看那一镜是看不出它是三维元素的；按整份扫则必然在声明它的那一镜里被扫到。
+    （多扫到的代价只是"某个纯 2D 分镜也用 ThreeDScene"，无副作用。）
+    """
+    for sc in (storyboard or {}).get("scenes", []) or []:
+        for el in sc.get("elements", []) or []:
+            if isinstance(el, dict) and el.get("kind") in _D3_KINDS:
+                return True
+        for ac in sc.get("timeline", []) or []:
+            if isinstance(ac, dict) and ac.get("do") in _D3_ACTIONS:
+                return True
+    return False
+
+
 # 构建期依赖：这些参数指向别的元素，构建时必须先生成对方（`_Builder.build()` 用的就是
 # 这一份）。carry 校验也读它 —— 承接了一个元素、却没承接它依赖的元素，
 # 边界清屏会把依赖清掉，画面就剩个"飘着的图"。
 BUILD_DEPS = ("axes", "curve", "of", "path")
+
+# 三维元素 / 动作。用到任何一个，生成的场景基类就要从 `Scene` 换成 `ThreeDScene`
+# （见 renderer.HEADER 的 {scene_base}）—— 不换的话相机转不了、
+# `rotate_camera` 会直接 AttributeError。
+# 同时被 `_layout_errors_for` 用来跳过"2D 版面估算"（3D 物体的屏幕尺寸随视角变，
+# 那套系数估不了它）。
+_D3_KINDS = frozenset({"three_axes", "surface", "space_curve"})
+_D3_ACTIONS = frozenset({"rotate_camera"})
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TRACKER_REF = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
@@ -341,44 +370,97 @@ def rich(s, **kw):
     return rows
 
 
-# ---- 版面护栏：按"元素在画面里的实际位置"算可用空间 --------------------------
-# 左右各留 0.9111 → 居中元素可用宽 = 14.2222 - 2*0.9111 = 12.4
-# 上下各留 0.7    → 居中元素可用高 = 8.0    - 2*0.7    = 6.6
+# ---- 版面护栏（_fit）：只保证"不出画"；安全边距只用来给**居中**内容封顶 --------
+# 左右各留 0.9111 → 居中元素容量 = 14.2222 - 2*0.9111 = 12.4
+# 上下各留 0.7    → 居中元素容量 = 8.0    - 2*0.7    = 6.6
 # ⚠️ 与 storyboard/metrics.py 的 BUDGET_W / BUDGET_H 是同一组数（有测试盯着）
+# ⚠️ 这两个数说的是"**居中**内容的容量"，不是"画面有多大" —— 绝不能拿它去判一个
+#    `place` 贴边摆放的元素放不放得下（那样会把字缩没，见 _fit 的说明）。
 _FRAME_MARGIN_X = 0.9111
 _FRAME_MARGIN_Y = 0.7
+# 缩放的下限。再小就等于把内容变成看不清的灰块 —— 那种时候"被裁掉一截"反而是
+# 更容易被发现、也更容易改的失败方式（作者一眼就知道自己 place 摆错了）。
+_FIT_MIN_SCALE = 0.5
 _FIT_WARNED = set()
 
 
 def _fit(m, name="", max_w=None, max_h=None):
     """
-    防溢出护栏：按元素**当前所在的位置**算可用空间，真放不下才等比缩小，并留一条告警。
+    防溢出护栏：只保证元素**不出画**。缩放是最后手段，且有一条硬下限。
 
-    为什么不是写死的 `max_w=12.4 / max_h=6.6`：那两个数只对**居中**的元素成立。
-    元素被 `place: [{"edge":"down","buff":1.0}]` 摆到偏下位置时，它下方只剩一点点空间，
-    还按 6.6 判就会"看代码没事、渲染出来下半截出画"。按位置算之后，居中元素的可用
-    空间恰好还是 12.4 × 6.6 —— 所以老分镜的观感零变化。
+    判据为什么是"画面"而不是"12.4 × 6.6"：那两个数是**居中内容**的容量预算
+    （超过它校验层就会打回），不是"画面有多大"。元素一旦用 place 贴到画面边上
+    （`{"edge":"down","buff":0.5}`、`{"corner":"dr","buff":0.4}` —— 示例里到处都是），
+    它本来就落在安全边距里，那是作者的显式排版，不是错误。旧写法把预算当硬线，
+    于是"离边越近 → 算出来的可用空间越小 → 缩得越狠"：buff=0.5 缩到 0%（字直接
+    消失）、buff=0.6 缩到 48%、buff=0.7 缩到 77%（2026-09-17 用户反馈的
+    "有时候渲染出来的字特别小"，实测 buff ≤ 0.7 必命中）。
 
-    为什么真缩了要打 WARN：静默缩小正是"字怎么这么小"而日志里一个字都没有的来源。
-    校验层的估算本该先拦住它，走到了这里说明估算那次漏了，必须留下线索。
-    同一个元素只喊一次 —— `always_redraw` 的元素每帧都会调 _fit，不挡会刷屏。
+    现在的口径：**绕元素当前的中心，在画面之内能用多大就用多大**，再拿预算封顶。
+    缩放绕中心做、中心不动，所以两侧里更紧的那一侧说了算：
+
+        room = 2 * min(半边长 - 中心, 半边长 + 中心)
+
+    三条性质各自都对得上：
+      · 居中元素（中心 = 0）算出来正好是整条边长，再被预算封顶 → 还是 12.4 × 6.6，
+        老分镜观感零变化；
+      · `to_edge` / `to_corner` 摆出来的元素，room 恰好等于 `自身尺寸 + 2*buff`，
+        只要 buff ≥ 0 就恒 ≥ 自身尺寸 → **不会缩**（会缩当且仅当真的出画）；
+      · 中心已经跑到画面外时 room ≤ 0 → 缩小**救不回来**（中心不动，元素永远有一截
+        在外面），这时只告警不缩 —— 硬缩的结果是把整句缩成 0%。
+
+    最后用 `_FIT_MIN_SCALE` 兜住"贴着画面边、要缩掉一半以上才放得下"的病态输入
+    （负 buff、把元素 shift 出画面之类）：宁可留一截在画外，也不把内容缩成灰块。
+
+    告警必须能自证、可执行：原始多大 / 缩到多少 / 画面多大 / 该改哪里。
+    逐元素只喊一次 —— `always_redraw` 每帧都会调 _fit，不挡会刷屏。
     """
-    half_w = config.frame_width / 2 - _FRAME_MARGIN_X
-    half_h = config.frame_height / 2 - _FRAME_MARGIN_Y
+    fw, fh = config.frame_width, config.frame_height
     c = m.get_center()
-    avail_w = 2 * min(c[0] + half_w, half_w - c[0])
-    avail_h = 2 * min(c[1] + half_h, half_h - c[1])
-    if max_w is not None:
-        avail_w = min(avail_w, max_w)
-    if max_h is not None:
-        avail_h = min(avail_h, max_h)
-    k = max(m.width / max(avail_w, 1e-6), m.height / max(avail_h, 1e-6), 1.0)
+    w0, h0 = m.width, m.height
+
+    def _room(pos, frame, budget):
+        """
+        这个轴上能用多大（<= 0 表示中心已在画面外、缩放无解）。
+
+        `min(room, budget)` 里那个 budget 只对**居中**内容起作用（居中时 room 就是
+        整条边长，预算更小），贴边内容由 room 说了算 —— 两者取小的写法保证了
+        "居中内容的口径不变"和"贴边内容不被预算误伤"同时成立。
+        """
+        half = frame / 2
+        room = 2 * min(half - pos, half + pos)
+        return min(room, budget) if room > 1e-6 else 0.0
+
+    aw = _room(c[0], fw, fw - 2 * _FRAME_MARGIN_X)
+    ah = _room(c[1], fh, fh - 2 * _FRAME_MARGIN_Y)
+    if max_w is not None and aw > 0:
+        aw = min(aw, max_w)
+    if max_h is not None and ah > 0:
+        ah = min(ah, max_h)
+
+    k = 1.0
+    if aw > 0:
+        k = max(k, w0 / aw)
+    if ah > 0:
+        k = max(k, h0 / ah)
+
+    msg = ""
     if k > 1.0001:
-        m.scale(1.0 / k)
-        if name and name not in _FIT_WARNED:
-            _FIT_WARNED.add(name)
-            print("[WARN] 元素 %s 在当前位置放不下，已自动缩到 %.0f%%"
-                  " —— 校验层的尺寸估算没拦住它（见 metrics.py）" % (name, 100.0 / k))
+        s = max(1.0 / k, _FIT_MIN_SCALE)
+        m.scale(s)
+        msg = ("元素 %s 超出画面，已自动缩到 %.0f%%（原始 %.2f × %.2f → %.2f × %.2f，"
+               "画面 %.2f × %.2f）"
+               % (name, 100.0 * s, w0, h0, m.width, m.height, fw, fh))
+        if s > 1.0 / k + 1e-9:
+            msg += ("；已到 %.0f%% 下限（再小就看不清了），缩完仍有一截在画面外"
+                    % (100.0 * _FIT_MIN_SCALE))
+    elif aw <= 0 or ah <= 0:
+        msg = ("元素 %s 的中心落在画面外（中心 %.2f, %.2f；画面 %.2f × %.2f）—— "
+               "绕中心缩小救不回来，请改 place 的 buff / edge，或减小元素尺寸"
+               % (name, c[0], c[1], fw, fh))
+    if msg and name and name not in _FIT_WARNED:
+        _FIT_WARNED.add(name)
+        print("[WARN] " + msg)
     return m
 
 
@@ -589,6 +671,22 @@ ELEMENT_SPEC = {
             "tips": (T_BOOL, True, "是否画箭头"),
         },
     },
+    "three_axes": {
+        "desc": "三维坐标系（xyz 三轴）—— 空间曲面 / 空间曲线 / 空间点的基准，"
+                "配合 rotate_camera 转动视角才有立体感",
+        "params": {
+            "x_range": (T_RANGE, [-4, 4, 1], "[min,max,step]"),
+            "y_range": (T_RANGE, [-4, 4, 1], "[min,max,step]"),
+            "z_range": (T_RANGE, [-3, 3, 1], "[min,max,step]"),
+            "x_length": (T_NUM, 7.0, "x 轴长度 2~11"),
+            "y_length": (T_NUM, 7.0, "y 轴长度 2~11"),
+            "z_length": (T_NUM, 5.0, "z 轴长度 1.5~8"),
+            "numbers": (T_BOOL, True, "是否显示刻度数字"),
+            "numbers_style": (T_STR, "latex", "刻度数字渲染方式：latex / text（快）"),
+            "phi": (T_NUM, 70.0, "初始俯仰角 0~90（0=平视、90=从正上方俯视）"),
+            "theta": (T_NUM, -45.0, "初始水平转角 -360~360"),
+        },
+    },
     "number_plane": {
         "desc": "带网格的平面（讲向量/复数时用）",
         "params": {
@@ -614,6 +712,29 @@ ELEMENT_SPEC = {
             "axes": (T_REF, None, "所属坐标系 id"),
             "fx": (T_EXPR, "cos(t)", "x = fx(t)"),
             "fy": (T_EXPR, "sin(t)", "y = fy(t)"),
+            "t_range": (T_RANGE, [0, 6.283, 0.05], "[tmin,tmax,step]"),
+            "color": (T_COLOR, "YELLOW", "颜色"),
+            "stroke_width": (T_NUM, 3.0, "线宽"),
+        },
+    },
+    "surface": {
+        "desc": "三维曲面 z = f(x,y)（必须挂在 three_axes 上；用 rotate_camera 转视角）",
+        "params": {
+            "axes": (T_REF, None, "所属三维坐标系 id（必须是 three_axes）"),
+            "expr": (T_EXPR, "x**2 + y**2", "z = f(x,y)，可用 x、y 与数学函数"),
+            "u_range": (T_RANGE, [-2, 2, 0.2], "x 的取值范围 [min,max]"),
+            "v_range": (T_RANGE, [-2, 2, 0.2], "y 的取值范围 [min,max]"),
+            "color": (T_COLOR, "PRIMARY", "面色"),
+            "opacity": (T_NUM, 0.85, "不透明度 0.1~1"),
+        },
+    },
+    "space_curve": {
+        "desc": "空间曲线 (fx(t), fy(t), fz(t))（必须挂在 three_axes 上）",
+        "params": {
+            "axes": (T_REF, None, "所属三维坐标系 id（必须是 three_axes）"),
+            "fx": (T_EXPR, "cos(t)", "x = fx(t)"),
+            "fy": (T_EXPR, "sin(t)", "y = fy(t)"),
+            "fz": (T_EXPR, "t", "z = fz(t)"),
             "t_range": (T_RANGE, [0, 6.283, 0.05], "[tmin,tmax,step]"),
             "color": (T_COLOR, "YELLOW", "颜色"),
             "stroke_width": (T_NUM, 3.0, "线宽"),
@@ -823,6 +944,42 @@ REPLACE_EFFECT_DEFAULT = "crossfade"
 # slide 的位移量：旧的上移淡出、新的从下方顶上来（同一个 shift 就是"往上走一条"）
 REPLACE_SLIDE_SHIFT = 0.35
 
+# 每个动作允许的**附加参数名**（机器可读版）。
+#
+# ⚠️ 这是 DSL 对外契约的一部分：`ACTION_SPEC` 里 `args` 那句是给人和模型看的散文，
+#    这张表是给校验层用的名单，**两者必须一起改**。
+#    ⚠️ 改这张表要当成"改契约"来对待：名单少写一个 → 合法的分镜被误拒
+#    （会白烧一轮 LLM 重试，比漏报更坏）；多写一个 → 静默失败又回来了。
+#
+# 为什么必须成表（2026-09-17）：`_norm_action` 原来只按 `do` 分支读它认识的键，
+# **多写的键被静静丢掉** —— 模型写 `{"do":"create","target":"x","duration":2}`
+# （想说时长但名字写错）时什么都不发生，动画照样用默认时长。
+# 要报错就必须先能回答"这个动作允许哪些键"。
+#
+# `do` / `run_time` / `lag_ratio` / `target` / `inline` / `inline_into` 是所有动作
+# 通用的（见 _ACTION_UNIVERSAL），不在这里重复列。
+_ACTION_KEYS = {
+    "create": (), "write": (), "fade_in": ("shift",), "grow": ("from",),
+    "draw_border": (), "show": (), "fade_out": (), "remove": (),
+    "indicate": ("color",), "circumscribe": ("color",), "flash": ("color",),
+    "wiggle": (), "focus": (), "clear_all": (),
+    "transform": ("into",), "replace": ("into", "effect"),
+    "shift": ("vector",),
+    # point 是正式写法；to / target_point 是代码里**故意容忍**的历史别名，别删
+    "move_to": ("point", "to", "target_point"),
+    "move_cells": ("of", "rows", "cols"),
+    "scale": ("factor",), "rotate": ("angle",),
+    "set_color": ("color",), "set_opacity": ("opacity",),
+    "set_stroke": ("color", "width"),
+    "stretch": ("factor", "dim"),
+    "move_along": ("path",), "trace": ("color", "width"),
+    "tracker_to": ("to", "rate_func"),
+    "rotate_camera": ("theta", "phi", "zoom"),
+    "wait": ("time",), "parallel": ("actions",),
+}
+_ACTION_UNIVERSAL = ("do", "run_time", "lag_ratio", "target", "inline", "inline_into")
+
+
 ACTION_SPEC = {
     "create": {"desc": "Create：沿路径画出线条图形", "target": True, "run_time": 1.2},
     "write": {"desc": "Write：书写文字/公式", "target": True, "run_time": 1.0},
@@ -869,6 +1026,10 @@ ACTION_SPEC = {
               "args": "color / width"},
     "tracker_to": {"desc": "驱动追踪器变化（带它的元素会自动跟着动）", "target": True, "run_time": 3.0,
                    "args": "to（目标数值）+ rate_func"},
+    "rotate_camera": {"desc": "转动三维视角（相机绕场景转，只对含 three_axes 的分镜有意义）",
+                      "target": False, "run_time": 2.5,
+                      "args": "theta（水平转角 -360~360，负值反向）/ phi（俯仰角 0~90，"
+                              "0=平视、90=正上方俯视）/ zoom（缩放 0.1~8）；至少给一个"},
     "wait": {"desc": "停顿", "target": False, "run_time": 0.5, "args": "time"},
     "clear_all": {"desc": "FadeOut 并移除所有元素（一键清屏）", "target": False, "run_time": 0.5},
     "parallel": {"desc": "并行执行多个子动作（每个可有独立 run_time）", "target": False, "run_time": None,
@@ -975,7 +1136,7 @@ def _strip_dollar(s):
 
 
 def _check_point(v, where, declared):
-    """点：坐标数组 / {ref,x,y} / {of,anchor}。"""
+    """点：坐标数组 / {ref,x,y} / {ref,x,y,z}（三维）/ {of,anchor}。"""
     if isinstance(v, list):
         if len(v) != 2:
             raise DSLError(f"{where}: 坐标数组必须是 [x, y]")
@@ -988,9 +1149,16 @@ def _check_point(v, where, declared):
             if "x" not in v or "y" not in v:
                 raise DSLError(f"{where}: {{ref,x,y}} 缺 x 或 y")
             # x / y 允许是 "$tracker" 或表达式，这样点就能沿着曲线跑
-            return {"ref": rid,
-                    "x": _as_coord(v["x"], f"{where}.x"),
-                    "y": _as_coord(v["y"], f"{where}.y")}
+            out = {"ref": rid,
+                   "x": _as_coord(v["x"], f"{where}.x"),
+                   "y": _as_coord(v["y"], f"{where}.y")}
+            # z 是**可选**的：只有 three_axes 上的空间点才写（z=0 也要写出来才算三维点）。
+            # 「写了 z、但 ref 指向 2D 的 axes」必须拦下 —— manim 的
+            # `Axes.coords_to_point` 用的是 `zip(other_axes, coords[1:], strict=False)`，
+            # 第三个坐标会被**静默丢掉**，画出来看着像对、其实全错（见 _check_3d）。
+            if v.get("z") is not None:
+                out["z"] = _as_coord(v["z"], f"{where}.z")
+            return out
         if "of" in v:
             if v["of"] not in declared:
                 raise DSLError(f"{where}: 引用了未声明的元素 {v['of']!r}")
@@ -1065,6 +1233,8 @@ def _check_cell_ids(v, where):
 REQUIRED = {
     "text": ["content"], "formula": ["content"],
     "plot": ["axes", "expr"], "parametric": ["axes", "fx", "fy"],
+    # 三维三个同理：不给 expr/fx/fy/fz 就会拿默认值静默画出一个别的曲面/曲线
+    "surface": ["axes", "expr"], "space_curve": ["axes", "fx", "fy", "fz"],
     "area": ["axes", "curve", "x_range"], "riemann": ["axes", "curve", "x_range"],
     "dot": ["at"], "line": ["start", "end"], "arrow": ["start", "end"],
     "polygon": ["points"], "angle": ["a", "vertex", "c"],
@@ -1168,12 +1338,34 @@ def _norm_element(el, declared, trackers, where, prev=None):
     spec = ELEMENT_SPEC[kind]["params"]
     out = {"id": eid, "kind": kind}
 
-    # live 是所有元素通用的开关：true 则强制用 always_redraw 包裹，
-    # 用于"跟着别的动态元素一起动"（例如始终套在动点外面的强调框）。
-    # 兜底键（本模块自己产出的元信息）必须排除，否则第二遍会把它们当成
-    # "模型多写的未知参数"再记一次：`_dropped: []` → `_dropped: ["_dropped"]`。
-    # 这就是规范化不幂等的一个真实形态，2026-09-14 由 tests/ 抓出来。
-    unknown = set(el.keys()) - set(spec) - {"id", "kind", "place", "live", "_dropped"}
+    # ⚠️ 多写的参数**必须报错，不能静默丢掉**（2026-09-17 修）。
+    #
+    # 原来是把它们收进 `out["_dropped"]` 就完事 —— 而那个字段**除它自己之外没有任何
+    # 地方读取**，于是模型多写参数时什么都不发生：它以为"把这段文字转了 30 度"，
+    # 画面纹丝不动。这是标准的静默失败（"能出片、内容是错的"），本项目最忌讳的一类。
+    #
+    # 影响面先量过（这才是敢改成硬报错的前提）：
+    #   · 25 个 examples 里 **0 处**多写参数；
+    #   · 调用留档里 49 条成功回复、992 个元素里也是 **0 处**。
+    # 也就是说这条路径目前只是"潜伏"，改成报错不会误伤任何存量数据。
+    #
+    # 下划线开头的是**给人看的注释**（examples 在用 `_note` / `_comment`），照旧忽略；
+    # id/kind/place/live/_dropped 是通用键，不算多写。
+    # （`_dropped` 是规范化自己产出的元信息，必须排除，否则第二遍会把它当成
+    #   "模型多写的未知参数"再记一次 —— 2026-09-14 由 tests/ 抓出的不幂等形态。）
+    _UNIVERSAL = {"id", "kind", "place", "live", "_dropped"}
+    unknown = sorted(k for k in el
+                     if k not in spec and k not in _UNIVERSAL
+                     and not str(k).startswith("_"))
+    if unknown:
+        raise DSLError(
+            f"{where}: {kind} 没有这些参数：{unknown}。"
+            f"{kind} 支持的参数是：{'、'.join(spec)}。"
+            f"（要调位置 / 大小 / 角度，那是 place 里的键，写成 "
+            '{"place":[{"rotate":30}]} 这种形式，见规格「布局」一节；'
+            f"要改外观用动作，如 set_color / scale。这些参数不会生效，所以直接报出来。）"
+        )
+
     out["live"] = bool(el.get("live", False))
     for k, v in el.items():
         if k in ("id", "kind", "place", "live", "_dropped"):
@@ -1229,7 +1421,9 @@ def _norm_element(el, declared, trackers, where, prev=None):
     if "place" in el:
         out["place"] = _norm_place(el["place"], f"{where}.place", declared)
 
-    out["_dropped"] = sorted(unknown)
+    # 未知参数现在直接报错（见上面），所以这里恒为空 —— 保留字段是为了让规范化产物的
+    # **形状稳定**（幂等测试逐字段比对，少一个键也算"变了"）。
+    out["_dropped"] = []
     declared.add(eid)
     return out
 
@@ -1464,6 +1658,23 @@ def _norm_action(ac, declared, trackers, where):
     spec = ACTION_SPEC[do]
     out = {"do": do}
 
+    # ⚠️ 多写的参数名**必须报错**（2026-09-17，与元素侧同一类静默失败）：
+    # 原来 `_norm_action` 只按 do 分支读它认识的键，多写的键被**静静丢掉** ——
+    # 模型写 `{"do":"create","target":"x","duration":2}`（想说时长、名字写错）时
+    # 什么都不发生，动画还是默认时长。要报错就必须先有"什么算合法"的名单，
+    # 于是有了 `_ACTION_KEYS`（改它等于改对模型的契约，见那张表上面的说明）。
+    _allowed = set(_ACTION_UNIVERSAL) | set(_ACTION_KEYS.get(do, ()))
+    _extra = sorted(k for k in ac
+                    if k not in _allowed and not str(k).startswith("_"))
+    if _extra:
+        extra_keys = "、".join(_ACTION_KEYS.get(do, ())) or "（没有附加参数）"
+        raise DSLError(
+            f"{where}: {do} 没有这些参数：{_extra}。"
+            f"{do} 接受的附加参数是：{extra_keys}"
+            f"（另有通用键 run_time / lag_ratio / target）。"
+            f"名字写错会静默失效，所以直接报出来。"
+        )
+
     rt = ac.get("run_time", spec["run_time"])
     if rt is not None:
         rt = _as_num_or_ref(rt, f"{where}.run_time")
@@ -1546,6 +1757,27 @@ def _norm_action(ac, declared, trackers, where):
         out["time"] = float(ac.get("time", out.get("run_time", 0.5)))
         if not (0.05 <= out["time"] <= 20):
             raise DSLError(f"{where}.time: {out['time']} 超出 [0.05, 20]")
+
+    if do == "rotate_camera":
+        # 相机角度用**角度制**（模型和人都按度数想），生成代码时再乘 DEGREES。
+        # ⚠️ **至少要给一个参数**：一个都不给等于"原地不动"，那是一次静默无效的动作 ——
+        # 写了、画面什么都没发生、也不报错，正是本项目最忌讳的形态。
+        moved = False
+        for key, lo, hi in (("theta", -360.0, 360.0), ("phi", 0.0, 90.0),
+                            ("zoom", 0.1, 8.0)):
+            if ac.get(key) is None:
+                continue
+            v = _as_num_or_ref(ac[key], f"{where}.{key}")
+            if isinstance(v, str):
+                raise DSLError(f"{where}.{key}: 相机角度不能用追踪器")
+            if not (lo <= v <= hi):
+                raise DSLError(f"{where}.{key}: {v} 超出 [{lo}, {hi}]")
+            out[key] = v
+            moved = True
+        if not moved:
+            raise DSLError(
+                f"{where}: rotate_camera 至少要给 theta 或 phi（都不给等于没转）"
+            )
 
     if do == "parallel":
         subs = ac.get("actions")
@@ -1725,9 +1957,28 @@ def _scan_point_exprs(obj):
     return out
 
 
+# 表达式里允许出现的「自由变量」（x 与数学函数之外的变量名）。
+#
+# ⚠️ 必须**按元素类型**给，不能全局放开。反例：`plot` 的 expr 里写 y 属于写错，
+# 现在会被明确拦下；一旦全局允许 y，生成的代码会走 `_safe_eval` → NameError →
+# 兜底成 0 → 曲线变成一条 y=0 的直线：画面能出、内容全错，本项目最怕的一类。
+#
+# ⚠️ `parametric` 这一条是**修 bug**（2026-09-16 探针实测）：它的 fx/fy 参数名是 t，
+# 而 ELEMENT_SPEC 给的默认值本身就是 "cos(t)"/"sin(t)" —— 不放开 t 的话，
+# 凡是用 parametric 的分镜**必然被拒**（连自己的默认值都过不了校验），
+# 模型只能改写成 `cos(x)` 这种错写法，或者编一个叫 t 的 tracker
+# （那会让曲线的参数 t 被 tracker 的值覆盖，画出来仍然是错的）。
+_FREE_VARS = {
+    "parametric": ("t",),
+    "space_curve": ("t",),      # 空间曲线：x/y/z 都是 t 的函数
+    "surface": ("y",),          # 曲面：z = f(x, y)
+}
+
+
 def _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs=None):
     """
-    表达式里出现的标识符：不是 x、不是数学函数，就必须是已声明的 tracker。
+    表达式里出现的标识符：不是 x、不是该元素允许的自由变量（见 _FREE_VARS）、
+    不是数学函数，就必须是已声明的 tracker。
 
     不查这一遍，写错名字只会让 `_safe_eval` 抛异常并兜底成 0 —— 画面能出、内容全错，
     这正是本项目从头到尾最怕的静默失败。
@@ -1736,26 +1987,32 @@ def _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs=None
     让模型一轮改完（见 validate_scene 与 _format_errors）。
 
     Args:
-        extra_exprs: `(where, expr)` 列表。给**没能通过规范化的元素**用 ——
-            那些元素进不了 norm_els，但它们表达式里的名字写错是独立的一处错误，
-            顺手扫一遍能少烧一轮重试（这些表达式只做只读扫描，不参与规范化）。
+        extra_exprs: `(where, expr[, 允许的自由变量])` 列表。给**没能通过规范化的
+            元素**用 —— 那些元素进不了 norm_els，但它们表达式里的名字写错是独立的一处
+            错误，顺手扫一遍能少烧一轮重试（这些表达式只做只读扫描，不参与规范化）。
     """
     found = list(extra_exprs or [])
     for el in norm_els:
-        for key in ("expr", "fx", "fy"):
+        free = _FREE_VARS.get(el.get("kind"), ())
+        for key in ("expr", "fx", "fy", "fz"):
             if isinstance(el.get(key), str):
-                found.append((f"{el['id']}.{key}", el[key]))
-        found += [(f"{el['id']}", e) for e in _scan_point_exprs(el)]
+                found.append((f"{el['id']}.{key}", el[key], free))
+        found += [(f"{el['id']}", e, free) for e in _scan_point_exprs(el)]
     for i, ac in enumerate(norm_acts):
-        found += [(f"timeline[{i}].point", e) for e in _scan_point_exprs(ac)]
+        found += [(f"timeline[{i}].point", e, ()) for e in _scan_point_exprs(ac)]
 
     errs = []
-    for where, expr in found:
+    for item in found:
+        # 兼容老的两元组形态：调用方少写一个字段时不该整个炸掉
+        where, expr = item[0], item[1]
+        free = item[2] if len(item) > 2 else ()
         for name in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr):
-            if name != "x" and name not in SAFE_NAMES and name not in trackers:
+            if (name != "x" and name not in free
+                    and name not in SAFE_NAMES and name not in trackers):
+                allowed = "、".join(("x",) + tuple(free))
                 errs.append(
                     f"{where_root}.{where}: 表达式 {expr!r} 里的 {name!r} 未定义"
-                    f"（只能是 x、数学函数，或某个 tracker 的 id）"
+                    f"（只能是 {allowed}、数学函数，或某个 tracker 的 id）"
                 )
     return errs
 
@@ -1878,6 +2135,191 @@ def _check_cell_refs(where_root, norm_els, norm_acts):
 
 
 # ==============================================================================
+# 三维一致性（"写了 3D 的东西，就真的按 3D 生效"）
+# ==============================================================================
+def _iter_ref_points(obj):
+    """递归找出所有 `{ref, ..., z}` 形态的点 —— 用来查"z 只能挂在三维坐标系上"。"""
+    if isinstance(obj, dict):
+        if "ref" in obj and obj.get("z") is not None:
+            yield obj
+        else:
+            for v in obj.values():
+                yield from _iter_ref_points(v)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from _iter_ref_points(v)
+
+
+def _check_3d(where_root, norm_els, norm_acts, trackers=()):
+    """
+    三维相关的**类型 + 值域**校验。declared 只保证 id 存在、不看 kind，所以必须补这一遍。
+
+    拦的是同一类失败：**写了三维写法，却被 2D 的东西默默吃掉 / 顶出画面。**
+      · `Axes.coords_to_point` 的实现是 `zip(other_axes, coords[1:], strict=False)`
+        （manim 0.21 `coordinate_systems.py:2183`）—— 2D 的 Axes 只有两条轴，
+        第三个坐标会被**直接丢掉**：点画在平面上某个位置，z 根本没生效。
+      · 曲面 / 空间曲线挂在 2D axes 上同理：z 被吃掉，立体东西塌成一条线，
+        画面能出、内容全错 —— 正是本项目最忌讳的那一类。
+      · `rotate_camera` 在没有 three_axes 的分镜上会调 `self.move_camera`，
+        而那是 ThreeDScene 才有的方法：2D 的 Scene 上直接 AttributeError，
+        整个分镜渲不出来（校验层本该把它拦在渲染之前）。
+      · **值域顶出坐标系**：曲面/曲线的取值范围超出 three_axes 声明的区间时，
+        超出部分会画到画面外（2026-09-16 实测：z 到 9.7、z_range 只到 7，
+        一个"碗"直接顶满并且冲出屏幕上沿）。这类错误必须在渲染前报掉，
+        而且要报出"该把 range 改成多少"。
+
+    返回错误列表（不抛），用法与 `_check_cell_refs` 一致。
+    """
+    byid = {el["id"]: el for el in norm_els}
+    kinds = {k: v["kind"] for k, v in byid.items()}
+    errs = []
+
+    owners = [(el, f"{where_root}.{el['id']}") for el in norm_els]
+    owners += [(ac, f"{where_root}.timeline[{i}]")
+               for i, ac in enumerate(norm_acts)]
+
+    for el in norm_els:
+        kind = el.get("kind")
+        if kind in ("surface", "space_curve"):
+            ax = byid.get(el.get("axes"))
+            if ax is None or ax.get("kind") != "three_axes":
+                errs.append(
+                    f"{where_root}.{el['id']}.axes: {kind} 必须挂在 three_axes 上，"
+                    f"当前是 {kinds.get(el.get('axes'), '未声明')!r} —— 2D 坐标系会把 "
+                    f"z 丢掉，画出来看着像对、其实是错的"
+                )
+            else:
+                errs += _d3_range_errors(where_root, el, ax, trackers)
+    for owner, where in owners:
+        for pt in _iter_ref_points(owner):
+            if kinds.get(pt["ref"]) != "three_axes":
+                errs.append(
+                    f"{where}: 坐标 {pt!r} 里写了 z，但它引用的是 "
+                    f"{kinds.get(pt['ref'], '未声明')!r} —— z 只有挂在 three_axes 上"
+                    f"才生效（2D 坐标系会默默丢掉它）"
+                )
+
+    if not any(k == "three_axes" for k in kinds.values()):
+        for i, ac in enumerate(norm_acts):
+            if ac.get("do") == "rotate_camera":
+                errs.append(
+                    f"{where_root}.timeline[{i}]: rotate_camera 需要一个 three_axes "
+                    f"元素才能转视角（这个分镜里一个都没有）"
+                )
+    return errs
+
+
+# 值域采样的点数：曲面取 _D3_SAMPLES×_D3_SAMPLES 个点、空间曲线取 _D3_SAMPLES 个点。
+# 9 已经足够判断"会不会顶出坐标系"，而且纯算术、每份分镜都跑一遍也不心疼。
+_D3_SAMPLES = 9
+
+# ------------------------------------------------------------------------------
+# 构建期表达式求值（只服务值域检查）
+# ------------------------------------------------------------------------------
+# ⚠️ 语义必须与 RUNTIME_HELPER 里的 `_safe_eval` 保持一致（同一套函数白名单）：
+# 不一致的话，校验层算出来的值域和渲染时真画出来的东西就会分家 —— 那正是本项目
+# 最忌讳的"两处必须同时改"的漂移点。之所以不能直接复用那份实现：它在
+# **注入到生成代码里的字符串**里（RUNTIME_HELPER），不是本模块的可调用对象。
+#
+# 兜底方向刻意选"算不了就当没问题"（返回 None → 跳过检查）：这里是**校验层**，
+# 误报（把正确的分镜拒掉）比漏报更贵 —— 它会白烧一轮 LLM 重试。
+_MATH_NS = {
+    "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "asin": math.asin, "acos": math.acos, "atan": math.atan, "atan2": math.atan2,
+    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+    "exp": math.exp, "log": math.log, "ln": math.log, "log2": math.log2,
+    "log10": math.log10, "sqrt": math.sqrt, "abs": abs, "floor": math.floor,
+    "ceil": math.ceil, "sign": lambda v: (v > 0) - (v < 0), "min": min, "max": max,
+    "mod": math.fmod, "pow": pow, "round": round,
+    "pi": math.pi, "e": math.e, "tau": 2 * math.pi, "inf": math.inf,
+}
+
+
+def _safe_eval_static(expr, x=0.0, **extra):
+    """构建期求值：算不了就返回 None（调用方据此跳过检查，绝不误报）。"""
+    ns = dict(_MATH_NS)
+    ns["x"] = float(x)
+    ns.update({k: float(v) for k, v in extra.items()})
+    try:
+        v = float(eval(expr, {"__builtins__": {}}, ns))     # noqa: S307
+    except Exception:                                        # noqa: BLE001
+        return None
+    if v != v or v in (float("inf"), float("-inf")):
+        return None
+    return v
+
+
+def _d3_range_errors(where_root, el, ax, trackers):
+    """
+    三维元素的**值域**检查：曲面/曲线的取值不能顶出 three_axes 声明的区间。
+
+    求值用的是与生成代码**同一个** `_safe_eval`（同一套函数白名单、同样的兜底），
+    所以这里算出来的就是渲染时真会画到的东西 —— 两边不会漂移。
+
+    ⚠️ 表达式里含 tracker 时**直接跳过**：那种值域在构建期未知，
+    采样出来的只是"某一瞬间"的值，据此报错就是误报（误报比漏报更坏，它会白烧一轮重试）。
+    """
+    kind = el["kind"]
+    exprs = ([el.get("expr")] if kind == "surface"
+             else [el.get(f) for f in ("fx", "fy", "fz")])
+    for e in exprs:
+        if isinstance(e, str) and set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", e)) & set(trackers):
+            return []
+
+    def _rng2(v):
+        return float(v[0]), float(v[1])
+
+    def _axis(vals, rng, name, how):
+        lo, hi = _rng2(rng)
+        vmin, vmax = min(vals), max(vals)
+        if vmin < lo - 1e-9 or vmax > hi + 1e-9:
+            return [
+                f"{where_root}.{el['id']}: {how}的 {name} 取值范围是 "
+                f"[{vmin:.2f}, {vmax:.2f}]，超出了 three_axes 声明的 {name}_range "
+                f"[{rng[0]}, {rng[1]}] —— 超出的部分会直接画到画面外。"
+                f"改法：把 {name}_range 放宽成对 [{min(lo, vmin):.2f}, {max(hi, vmax):.2f}]，"
+                f"或缩小取值区间"
+            ]
+        return []
+
+    out = []
+    if kind == "surface":
+        u0, u1 = _rng2(el["u_range"])
+        v0, v1 = _rng2(el["v_range"])
+        xs, ys, zs = [], [], []
+        for i in range(_D3_SAMPLES):
+            u = u0 + (u1 - u0) * i / (_D3_SAMPLES - 1)
+            for j in range(_D3_SAMPLES):
+                v = v0 + (v1 - v0) * j / (_D3_SAMPLES - 1)
+                # 与生成代码同一套语义：表达式里的 x 是 u、y 是 v
+                z = _safe_eval_static(el["expr"], u, y=v)
+                if z is None:
+                    return []          # 有采样点算不出来 → 放弃检查（宁漏勿误）
+                zs.append(z)
+                xs.append(u)
+                ys.append(v)
+        what = "这个曲面"
+    else:
+        t0, t1 = _rng2(el["t_range"])
+        xs, ys, zs = [], [], []
+        for i in range(_D3_SAMPLES):
+            t = t0 + (t1 - t0) * i / (_D3_SAMPLES - 1)
+            x = _safe_eval_static(el["fx"], t)
+            y = _safe_eval_static(el["fy"], t)
+            z = _safe_eval_static(el["fz"], t)
+            if x is None or y is None or z is None:
+                return []
+            xs.append(x)
+            ys.append(y)
+            zs.append(z)
+        what = "这条空间曲线"
+    out += _axis(xs, ax["x_range"], "x", what)
+    out += _axis(ys, ax["y_range"], "y", what)
+    out += _axis(zs, ax["z_range"], "z", what)
+    return out
+
+
+# ==============================================================================
 # 版面出界判定（"会不会放不下"的唯一判据）
 # ==============================================================================
 def _layout_errors_for(el, where):
@@ -1894,6 +2336,12 @@ def _layout_errors_for(el, where):
     """
     kind = el["kind"]
     out = []
+
+    if kind in _D3_KINDS:
+        # 三维元素**不做出界估算**：metrics 里的系数全是按 2D 帧宽高量出来的，
+        # 而 3D 物体在屏幕上的大小由相机角度决定（转一下视角就变），估出来的数没有意义。
+        # 强行估只会把正确的分镜误判成"放不下" —— 误报比漏报更坏：它会让模型白改一轮。
+        return out
 
     def _too_big(w, h, hints, what):
         if not metrics.fits(w, h):
@@ -2090,9 +2538,10 @@ def validate_scene(scene, idx, prev=None):
             if isinstance(el, dict):
                 # 只写相对路径（不带 where_root）：_scan_expr_names 会自己补前缀，
                 # 写全了会拼成 "scene[1].scene[1].elements[1].expr" 这种重复前缀。
-                for key in ("expr", "fx", "fy"):
+                free = _FREE_VARS.get(el.get("kind"), ())
+                for key in ("expr", "fx", "fy", "fz"):
                     if isinstance(el.get(key), str):
-                        extra_exprs.append((f"elements[{i}].{key}", el[key]))
+                        extra_exprs.append((f"elements[{i}].{key}", el[key], free))
 
     # 承接的元素，它依赖的元素也必须一起承接。只承接 plot 不承接 axes 的话，
     # 边界清屏会把 axes 淡掉、只剩一个飘着的图 —— 下面这条把它变成硬错误。
@@ -2133,6 +2582,8 @@ def validate_scene(scene, idx, prev=None):
         except DSLError as e:
             errors.append(str(e))
         else:
+            # 三维一致性：3D 元素必须挂在 three_axes 上、z 不能被 2D 坐标系默默吃掉
+            errors += _check_3d(where_root, norm_els, norm_acts, trackers)
             # 版面出界（表格/文本/公式/图例按内容估算）。放在 cell_refs 之后：
             # 它对元素自身参数不敏感，不必跟"引用错了"这类问题抢注意力。
             errors += _check_layout_fits(where_root, norm_els)
@@ -2327,10 +2778,53 @@ class _Builder:
             if fit:
                 self.lines.append(f"        {var} = _fit({var}, {eid!r})")
 
+        # 三维分镜里的"屏幕固定"元素（HUD 字幕）：只**登记**、不上屏 ——
+        # 上屏时机仍由 timeline 的动作决定。所以这里调的是 camera 上的那个方法
+        # （它只往白名单里加一个对象），而不是 ThreeDScene.add_fixed_in_frame_mobjects
+        # （那个会顺手 `self.add(...)`，元素会在分镜一开始就冒出来，出场动画全废）。
+        if self._screen_fixed(el):
+            self.lines.append(
+                f"        self.camera.add_fixed_in_frame_mobjects({var})")
+            if dynamic:
+                # always_redraw 每帧 `become` 出来的子对象是**新对象**，而相机那份
+                # 白名单是按对象身份存的（three_d_camera.py:81 / :365）——
+                # 不补登记，换出来的新子对象就会重新被旋转投影（字会突然歪掉）。
+                self.lines.append(
+                    f"        {var}.add_updater("
+                    f"lambda m: self.camera.add_fixed_in_frame_mobjects(m))")
+
         # tracker 必须 add 进场景才会被动画更新（Manim 的硬性要求）
         if kind == "tracker":
             self.lines.append(f"        self.add({var})")
         return var
+
+    # 三维分镜里"可以当字幕看"的元素类型。几何图形不在其中 ——
+    # 它们本来就该待在三维空间里，跟着场景一起转。
+    _SCREEN_KINDS = ("text", "formula", "table", "legend", "number")
+
+    def _screen_fixed(self, el):
+        """
+        这个元素在**三维分镜**里要不要钉在屏幕上（当 HUD 字幕）。
+
+        判据：① 本分镜有 three_axes；② 是文字类元素；③ 它用了**屏幕平面**的定位
+        （edge / corner / next_to / center）。
+
+        为什么必须有这条：三维场景里一切都会被相机投影。放在画面右上角的标题不钉住的话，
+        会跟着视角一起被转斜、挪位，甚至转出画面（2026-09-16 实测：`place:[{"corner":"ur"}]`
+        的公式在 phi=68 / theta=-48 下几乎看不见了）。
+
+        为什么用 `place` 当判据、而不是"所有文字都钉住"：这样两类写法都自然 ——
+        写在角落的是字幕（钉住、不随视角转）；直接给坐标、点在立体图形上的标签
+        （不写 place，或只写 at_point）留在三维空间里跟着转。
+        **一个开关两种语义，不必给模型引入新概念。**
+        """
+        if not self.env.get("d3"):
+            return False
+        if el.get("kind") not in self._SCREEN_KINDS:
+            return False
+        return any(isinstance(p, dict)
+                   and ({"edge", "corner", "next_to", "center"} & set(p))
+                   for p in (el.get("place") or []))
 
     def _place_calls(self, place):
         """布局 → 一串可链式追加的方法调用，如 ['.to_edge(UP, buff=0.8)']。"""
@@ -2363,10 +2857,32 @@ class _Builder:
                 out.append(f".set_z_index({p['z']})")
         return out
 
-    def _expr_call(self, expr, xvar="x"):
-        """生成 _safe_eval 调用；表达式里出现的 tracker 名自动作为额外参数传入。"""
+    def _expr_call(self, expr, xvar="x", extra_kw=""):
+        """
+        生成 _safe_eval 调用；表达式里出现的 tracker 名自动作为额外参数传入。
+
+        Args:
+            xvar: 表达式里**自由变量的名字**（也就是代码里那个函数参数名）。
+            extra_kw: 额外的一个关键字参数，形如 `"y=v"`（曲面用：z = f(x,y) 里
+                两个自由变量都要喂进去）。放最后是因为 `_safe_eval(expr, x, **extra)`
+                的关键字参数与位置参数互不影响，顺序怎么写都对。
+
+        ⚠️ xvar 不是 "x" 时必须**再显式传一个同名关键字**（2026-09-17 修的真 bug）：
+        运行时是 `_safe_eval(expr, x, **extra)`，它只把第二个位置参数绑到名字 **x** 上。
+        而 param 曲线/空间曲线的自由变量叫 **t** —— 表达式 `cos(t)` 在运行时
+        直接 NameError，被 `_safe_eval` 兜底成 0.0，于是整条曲线**塌成一个点**，
+        画面能出、内容全错，一声不响。曲面（z=f(x,y)）之所以没露馅，
+        纯粹是因为它的自由变量恰好叫 x（走位置参数就对了）。
+        """
         names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expr))
         extra = [f"{t}={_V}{t}.get_value()" for t in sorted(names & self.trackers)]
+        # 自由变量名不是 x（如 t）→ 补一个同名实参，否则表达式里的 t 是未定义的
+        # （同名 tracker 已经占了 extra 的位置时跳过：那种情况本来就有歧义，
+        #  但至少不能让生成代码报"重复关键字参数"而整条渲不出来）
+        if xvar != "x" and xvar not in self.trackers:
+            extra.append(f"{xvar}={xvar}")
+        if extra_kw:
+            extra.append(extra_kw)
         args = ", ".join([f'r"""{_esc(expr)}"""', xvar] + extra)
         return f"_safe_eval({args})"
 
@@ -2414,6 +2930,21 @@ class _Builder:
                 f'x_length={_num(el["x_length"])}, y_length={_num(el["y_length"])}, '
                 f'axis_config={self._axes_config(el)}, tips={tips})')
 
+    def _mk_three_axes(self, el):
+        """
+        三维坐标系。刻度数字沿用 2D 那套开关（`numbers` / `numbers_style` 由
+        `_axes_config` 统一处理，`--fast` 或没装 LaTeX 时会自动换成 Text 渲染）。
+
+        ⚠️ 三条轴的长度**必须显式给**：ThreeDAxes 的默认长度是按 1080p 的帧高算的
+        （x/y 轴默认 `frame_height + 2.5` ≈ 10.5），照搬会顶满甚至超出画面。
+        """
+        return (f'ThreeDAxes(x_range={self._rng(el["x_range"])}, '
+                f'y_range={self._rng(el["y_range"])}, '
+                f'z_range={self._rng(el["z_range"])}, '
+                f'x_length={_num(el["x_length"])}, y_length={_num(el["y_length"])}, '
+                f'z_length={_num(el["z_length"])}, '
+                f'axis_config={self._axes_config(el)})')
+
     def _mk_number_plane(self, el):
         return (
             'NumberPlane(x_range=%s, y_range=%s, background_line_style='
@@ -2451,6 +2982,31 @@ class _Builder:
                 f'lambda t: (np.array([{self._expr_call(el["fx"], "t")}, '
                 f'{self._expr_call(el["fy"], "t")}, 0])), t_range={tr}, '
                 f'color={_color(el["color"])}, stroke_width={_num(el["stroke_width"])})')
+
+    def _mk_surface(self, el):
+        """
+        曲面 z = f(x, y)：`_safe_eval(expr, u, y=v)` —— 表达式里的 x 就是 u、y 就是 v
+        （`_FREE_VARS["surface"]` 放开的正是 y，见那里的说明）。
+
+        u_range / v_range 只取前两个数：manim 的 Surface 收的是 (min, max) 二元区间，
+        第三个"步长"在这里没有意义（采样密度由 Surface 自己的 resolution 决定）。
+        """
+        return (f'Surface(lambda u, v: {self._var(el["axes"])}.c2p('
+                f'u, v, {self._expr_call(el["expr"], "u", "y=v")}), '
+                f'u_range={self._rng(el["u_range"][:2])}, '
+                f'v_range={self._rng(el["v_range"][:2])}, '
+                f'color={_color(el["color"])}, '
+                f'fill_opacity={_num(el["opacity"])}, stroke_width=0)')
+
+    def _mk_space_curve(self, el):
+        """空间曲线 (fx(t), fy(t), fz(t))：三维坐标系上的参数曲线。"""
+        return (f'ParametricFunction(lambda t: {self._var(el["axes"])}.c2p('
+                f'{self._expr_call(el["fx"], "t")}, '
+                f'{self._expr_call(el["fy"], "t")}, '
+                f'{self._expr_call(el["fz"], "t")}), '
+                f't_range={self._rng(el["t_range"])}, '
+                f'color={_color(el["color"])}, '
+                f'stroke_width={_num(el["stroke_width"])})')
 
     def _mk_area(self, el):
         return (f'{_V}{el["axes"]}.get_area({_V}{el["curve"]}, '
@@ -2750,6 +3306,18 @@ class _Builder:
                     f"stroke_color={_color(ac['color'])}, stroke_width={_num(ac['width'])}))"
                 )
             return
+        if do == "rotate_camera":
+            # 相机运动：`ThreeDScene.move_camera` 自带动画，可直接给 run_time。
+            # 角度制 → manim 要弧度，所以生成 `theta * DEGREES`。
+            # （能在 2D 的 Scene 上调这个方法是校验层的责任：_check_3d 已拦住这种情况。）
+            kw = []
+            for k in ("theta", "phi"):
+                if ac.get(k) is not None:
+                    kw.append(f"{k}={_num(ac[k])} * DEGREES")
+            if ac.get("zoom") is not None:
+                kw.append(f"zoom={_num(ac['zoom'])}")
+            self.lines.append(f"        self.move_camera({', '.join(kw)}{rt_s})")
+            return
 
         if do == "transform":
             a, b = ac["target"][0], ac["into"]
@@ -2945,9 +3513,27 @@ def _est_action_time(ac):
 
 def build_scene(scene: dict, env: dict) -> str:
     """把一个 v2 分镜（elements + timeline）编译成 construct() 体内的代码。"""
+    # 本分镜是不是三维分镜（含 three_axes）。env 是**整份分镜共用**的那一份，
+    # 而"这一镜有没有 3D"是逐镜的（拆分渲染时更是每个文件一镜），所以这里拷贝一份再标注，
+    # 免得把上一镜的状态漏给下一镜；同时也保证纯 2D 分镜的生成源码逐字节不变。
+    ax3 = next((el for el in scene["elements"]
+                if el.get("kind") == "three_axes"), None)
+    env = dict(env)
+    env["d3"] = ax3 is not None
+
     b = _Builder(env)
     for el in scene["elements"]:
         b.els[el["id"]] = el
+
+    # 三维分镜：**先把相机拨到声明好的初始视角**再开始画。
+    # 不写这一步的话，manim 的 ThreeDScene 默认是 phi=0 的俯视 ——
+    # 一个曲面从正上方看就是一张平面图，立体感全无（模型写的 phi/theta 也就看不出效果）。
+    if ax3:
+        b.lines.append(
+            f"        self.set_camera_orientation("
+            f"phi={_num(ax3.get('phi', 70.0))} * DEGREES, "
+            f"theta={_num(ax3.get('theta', -45.0))} * DEGREES)"
+        )
 
     for el in scene["elements"]:
         b.build(el)
@@ -3084,6 +3670,11 @@ def describe(include_place=True) -> str:
     # "别把 Manim 的名字搬过来"，规格自己就不该先把它们摆出来。
     out.append("含 tracker 引用（或 live）的元素是**每帧重算**的对象：")
     out.append("**它们不会自动上屏，必须用 `{\"do\":\"show\",\"target\":\"...\"}` 显式显示。**")
+    # 2026-09-16 补的正面表态：规格里原先只讲"动态元素怎么用才不出错"，成本那点事
+    # 只在 llm.py 的取舍常识里以"警告"的形式出现，模型读到的净效果是"动态是个坑"。
+    # 而它恰恰是这套 DSL 最主要的表现力来源 —— 这里必须把话说正。
+    out.append("每帧重算只是**慢一点**，不值得为它放弃动态 —— 「变化 / 联动 / 累积」这类内容"
+               "就该让关键的量真的动起来，画面比出片快重要。")
     out.append("")
     out.append("## 网格与滑动窗口（卷积 / 池化 / 棋盘格 / 矩阵）")
     out.append("讲这类内容：格子用 `table`（数字天然落在格子里，不要用 text 拼多行数字），")
@@ -3103,6 +3694,31 @@ def describe(include_place=True) -> str:
     out.append("⚠️ 不要用 `rect` + `move_to` 自己估坐标去框格子：表格格子的尺寸是内容撑出来的，")
     out.append("估出来的框一定会歪（校验层也会直接拒绝 cell_box 上的 move_to/shift/scale）。")
     out.append("")
+    out.append("## 三维（立体）")
+    out.append("用 `three_axes` 建空间坐标系，把曲面 / 空间曲线 / 空间点挂上去，"
+               "再用 `rotate_camera` 转视角 —— 立体感要靠视角动起来才看得出来。")
+    out.append("```")
+    out.append('{"id":"ax3","kind":"three_axes","x_range":[-3,3,1],"y_range":[-3,3,1],"z_range":[-3,3,1]}')
+    out.append('{"id":"s","kind":"surface","axes":"ax3","expr":"x**2 + y**2","color":"PRIMARY"}')
+    out.append('{"do":"rotate_camera","theta":-25,"phi":65,"run_time":3}')
+    out.append("```")
+    out.append("三条硬性规则：")
+    out.append("1. `surface` / `space_curve` 的 `axes` **必须是 three_axes**；"
+               "带 z 的点（`{ref,x,y,z}`）也一样 —— 挂在 2D 的 `axes` 上时 z 会被"
+               "**默默丢掉**（画面看着像对、其实是错的），校验层会直接拒绝。")
+    out.append("2. `rotate_camera` 的角度是**角度制**：`phi` 是俯仰角"
+               "（0 = 平视、90 = 从正上方往下看），`theta` 是水平转角（负值反向）。"
+               "至少要给一个，否则等于没转。")
+    out.append("3. 三维分镜里的文字/公式分两种，按 `place` 区分："
+               "写了 `place`（edge / corner / next_to / center）的是**屏幕字幕** —— "
+               "固定在画面上不动、不随视角转（标题、结论、公式都用这个写法）；"
+               "不写 `place`、或用 `at_point` 给坐标的则留在三维空间里，跟着场景一起转"
+               "（给立体图形贴标签用这个写法）。")
+    out.append("4. 立体图形本身（three_axes / surface / space_curve）不要写 `place`："
+               "`to_edge` / `to_corner` 是「屏幕平面」里的概念，"
+               "对一个会随视角转动的立体对象没有稳定含义。")
+    out.append("")
+
     out.append("## 组合动画")
     out.append("- **parallel**：并行执行多个子动作，每个可有独立 run_time。")
     out.append('  ```{"do":"parallel","actions":[{"do":"create","target":"a","run_time":2},{"do":"write","target":"b","run_time":1}]}```')

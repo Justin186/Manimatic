@@ -105,6 +105,12 @@ async def chat(req: ChatRequest):
         # 不带的话，「生成对应视频」这种追问会被模型当成"你没给题目"——
         # 实测它真的会回一句「这次只收到了一句指令，没有附带任何题干」。
         past = store.load_thread_messages(req.thread_id)
+        # 上一版分镜：这里取它**只为了生成后对账**（llm.diff_scenes 打 WARN）。
+        # ⚠️ 必须在下面 save_thread_storyboard 之前取，否则拿到的是这一轮的新版本。
+        # 模型看到的"当前画面"不走这条路 —— 它跟着 past 里每条 assistant 记录的
+        # `meta.storyboard` 走（见 llm._history_with_storyboards）：JSON 就是模型自己的输出，
+        # 放回对话里最自然，也不用维护第二份"当前版本"的真相。
+        prev_raw, _prev_plan = store.load_thread_storyboard(req.thread_id)
         # 把本轮用户消息**先记下来**再调用：模型要看到"最后一条是本次请求"。
         # 顺序反过来的话，历史里永远缺当前这句。
         #
@@ -154,6 +160,14 @@ async def chat(req: ChatRequest):
         if not state["streamed"] and sb.get("brief"):
             push(*events.text_delta(sb["brief"]))
 
+        # 有没有"顺手改了别的地方"？只告警不拦截（见 llm.diff_scenes 的说明）：
+        # 提示词里已经要求"没被点名的分镜逐项一致"，但提示词管不住的东西要能看见 ——
+        # 否则"我调的又乱了"只能靠用户的眼睛发现。
+        if prev_raw:
+            changed = llm.diff_scenes(prev_raw, raw)
+            if changed:
+                print("      [WARN] 这一轮改动的分镜：" + "；".join(changed), flush=True)
+
         # 助手这轮的**自然语言结论**进历史（brief），**不是**分镜 JSON：
         # 分镜几千 token，塞进去会把上下文预算吃光，也会让前缀缓存次次落空。
         # brief 里已经写清了"这一轮讲了什么"，足够支撑下一轮的指代消解。
@@ -165,7 +179,12 @@ async def chat(req: ChatRequest):
             req.thread_id, "assistant", sb.get("brief") or "",
             meta={"message_id": mid,
                   "plan": sb.get("outline") or [],
-                  "intent": sb.get("intent") or "propose"})
+                  "intent": sb.get("intent") or "propose",
+                  # 把这一版分镜本体存进 meta：下一轮它会被还原成"模型自己的输出"
+                  # 一起发出去（见 llm._history_with_storyboards）——多轮改一版全靠它。
+                  # ⚠️ 不进 content：那是给人看的（前端聊天框显示的就是它），
+                  #    塞几千字 JSON 会把界面撑坏。
+                  "storyboard": raw})
 
         # 落盘：confirm 只会发 thread_id + message_id，分镜本体必须由后端记住。
         store.save_thread_storyboard(req.thread_id, raw, plan=sb.get("outline") or [])
@@ -175,6 +194,8 @@ async def chat(req: ChatRequest):
         print(f"[api] chat topic={topic[:40]!r} -> {len(sb['scenes'])} 分镜 "
               f"intent={sb.get('intent')} attempts={res['attempts']} "
               f"streamed={res.get('streamed')} "
+              # 带上"有没有上一版"：排查"改了没生效"时第一眼就看这里
+              f"旧版={'有' if prev_raw else '无'} "
               f"思考={state['thinking']}字 正文={state['streamed']}字", flush=True)
 
         push(*events.plan(sb.get("outline") or [], sb.get("intent") or "propose"))

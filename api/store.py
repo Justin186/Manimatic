@@ -211,10 +211,19 @@ def append_thread_message(thread_id, role, content, meta=None):
     """
     追加一轮对话，返回完整列表。
 
-    ⚠️ 只记**user 和 assistant 的自然语言**，不记分镜 JSON。
-    分镜是机器产物、动辄几千 token，塞进历史会：① 把上下文预算吃光；
-    ② 让前缀缓存每次都不命中（主流厂商按 token 计费，缓存命中便宜一大截）。
-    模型要分镜时会重新生成，不需要从历史里读。
+    ⚠️ `content` 只记**自然语言**（前端聊天框显示的就是它），分镜 JSON 记在
+    `meta.storyboard`：
+      · 塞进 content 会把界面撑坏 —— 几千字 JSON 会直接显示在聊天气泡里；
+      · 但模型**确实需要看到自己上一版写了什么**（多轮"改这一版"全靠它），
+        所以由 `llm._history_with_storyboards()` 在**发出去之前**从 meta 还原成
+        "brief + 分镜 JSON" 的 assistant 消息。
+      · 顺带：JSON 不进 content，消息文件也保持可读（`_tasks/messages/*.json` 是排查用的）。
+
+    2026-09-17 改：这里原先写的是"不记分镜 JSON，因为 ① 吃预算 ② 前缀缓存不命中"。
+    两条理由后来都不成立 —— ① JSON 中位 **1463 token**（49 份实测），默认 10000 的预算下
+    能留住约 6 轮带画面的对话；② 历史是**只追加**的，前缀缓存照常命中
+    （每一轮逐字稳定的前缀都在，变的只是末尾新增的那一轮）。
+    而代价是模型手里没有原料：实测"用户只让改第 2 镜，它顺手把第 3、4 镜也重写了"。
     """
     text = str(content or "").strip()
     if not text:
