@@ -14,6 +14,7 @@ brief 的字符最先到（1~2 秒），前端立刻有字可显示 —— 不�
 一次普通对话（前端 Q15：纯概念问答不该硬造动画）。
 """
 
+import threading
 import uuid
 
 from fastapi import APIRouter
@@ -189,6 +190,44 @@ async def chat(req: ChatRequest):
                 state["thinking"] += len(text)
                 push(*events.thinking_delta(text))
 
+        # ---- 会话标题：只在第一轮起，且与主生成**并行** ----
+        #
+        # 为什么单独发一次短请求，而不是复用分镜 JSON 里那个 `title`：
+        #   · **快**：那份 title 在 JSON 第 4 个键上，要等整份分镜生成完（十几秒~一分钟）
+        #     才拿得到；这条独立小请求 1~2 秒就回，侧栏几乎立刻有了名字。
+        #   · **不共用**（用户要求）：那个 title 是**视频标题**（要能说清讲了什么，
+        #     长一点没关系）；会话标题是侧栏里的标签，必须短。共用一个必然有一边难看。
+        #
+        # 三条刻意的取舍：
+        #   1. **只有第一轮起** —— 会话标题由"最一开始的请求"决定。否则用户在这条会话里
+        #      问第二道题时，第一条的名字会跳成新题，历史就对不上了。
+        #   2. 用户已改过名（meta.title 非空）就**不动**：手动改名优先级最高。
+        #   3. 失败/超时**静默放弃**：标题是锦上添花，退回"用户输入前 20 字"就够了，
+        #      绝不能因为它把这一轮拖垮（所以不重试、不报错、不 push error）。
+        #
+        # ⚠️ 线程体内必须**自己登记取消令牌**：ContextVar 不会自动进入新线程
+        #    （HANDOFF §8.70），漏了这一行，"停止"对这条请求就是完全无效且不报错。
+        title_thread = None
+        is_first_turn = not any(m.get("role") == "assistant" for m in past)
+        if (topic and is_first_turn
+                and not (store.load_session_meta(req.thread_id) or {}).get("title")):
+            def _suggest_title():
+                token = llm.set_cancel_token(cancel)
+                try:
+                    t = llm.suggest_thread_title(topic, cfg)
+                except Exception:                                  # noqa: BLE001
+                    return                      # 起不出来就退回"用户输入前 20 字"
+                finally:
+                    llm.reset_cancel_token(token)
+                if t:
+                    store.save_session_meta(req.thread_id, {"title": t})
+                    # 标题一到就推（不必等主生成），侧栏立刻改名
+                    push(*events.thread_title(t))
+
+            title_thread = threading.Thread(target=_suggest_title, daemon=True,
+                                            name="msb-title")
+            title_thread.start()
+
         try:
             res = llm.stream_storyboard(
                 topic, cfg, templates.TEMPLATE_REGISTRY,
@@ -262,7 +301,15 @@ async def chat(req: ChatRequest):
               f"旧版={'有' if prev_raw else '无'} "
               f"思考={state['thinking']}字 正文={state['streamed']}字", flush=True)
 
-        push(*events.plan(sb.get("outline") or [], sb.get("intent") or "propose"))
+        # 等标题那条收尾（通常早已跑完）。**有上限地等**：它万一卡住也不能拖住这一轮，
+        # 而且必须排在 plan / done 之前 —— 否则事件顺序就乱了（标题晚于"完成"）。
+        if title_thread is not None:
+            title_thread.join(timeout=3)
+
+        # title 是模型给的「整个讲解的标题」，前端拿它当**视频标题**
+        # （不是会话标题，见上面 _suggest_title 那一段的说明）。
+        push(*events.plan(sb.get("outline") or [], sb.get("intent") or "propose",
+                          sb.get("title") or ""))
         push(*events.done(mid))
 
     return sse_response(events.encode_stream(pipeline.stream(run, cancel)))

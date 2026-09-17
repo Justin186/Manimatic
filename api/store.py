@@ -596,6 +596,15 @@ def load_thread_detail(thread_id):
             intent = "propose" if item.get("plan") else "none"
         item["intent"] = intent
 
+        # 视频标题：这一轮分镜 JSON 里模型给的 `title`。
+        # 恢复时也带回去，否则刷新后前端会退回"第一个分镜名"（那是分镜标题，
+        # 不是这条视频的名字）。拿不到就**不给这个字段** —— 前端自己有兜底。
+        raw = m.get("storyboard")
+        if isinstance(raw, dict):
+            t = str(raw.get("title") or "").strip()
+            if t:
+                item["videoTitle"] = t
+
         # 只传这条消息**自己那一轮**的大纲：拿 cur_plan 兜底会把"会话当前这一版"
         # 的分镜标题套到别的产物上（段数由快照决定，标题却会串轮）。
         render = rebuild_render_state(thread_id, mid, item.get("plan"))

@@ -39,8 +39,30 @@ def thinking_delta(text):
     return "thinking_delta", {"text": text}
 
 
-def plan(outline, intent):
-    return "plan", {"plan": list(outline or []), "intent": intent}
+def plan(outline, intent, title=""):
+    """
+    `title` 是分镜 JSON 里那个「整个讲解的标题」—— 前端用它当**视频标题**。
+
+    为什么跟着 plan 一起发而不是单独开一个事件：它和 outline 出自同一份 JSON、
+    同一时刻到达，前端也是同一次 patch 就用上。多开一个事件类型只多一处要对齐的地方。
+
+    ⚠️ 它不是**会话标题** —— 会话标题是一次独立的极短调用生成的
+    （见 `llm.suggest_thread_title` 与 `thread_title` 事件），两者不共用。
+    """
+    data = {"plan": list(outline or []), "intent": intent}
+    if title:
+        data["title"] = str(title)
+    return "plan", data
+
+
+def thread_title(title):
+    """
+    会话标题（侧栏里那个标签），由一次独立的短调用生成。
+
+    ⚠️ 它是**新事件类型**，旧前端不认 —— 会走到"未知事件"分支被安全忽略，
+    只是标题退回"用户输入前 20 字"，不会崩。
+    """
+    return "thread_title", {"title": str(title)}
 
 
 def tool_call(segment_count, storyboard=None):
