@@ -580,15 +580,36 @@ async def stream(run, cancel):
 
     客户端中途断开时 Starlette 会关掉这个生成器 → finally 里 cancel()
     → 生产者线程的子进程立刻被杀掉，循环随之退出。
+
+    ============================================================================
+    心跳：为什么长任务必须一直有字节在流
+    ============================================================================
+    这条链上最长的空档是**模型思考**（开深度思考的模型正文要等思考走完才出字，
+    实测首字 93s，长思考几分钟），这期间前端一个事件都收不到 —— 连接上就是"死"的。
+    浏览器、网关、dev server 的转发层都可能因此把连接掐掉，前端拿到的是
+    `TypeError: Failed to fetch`（文案是"网络错误"，看起来像超时），而任务其实在跑。
+
+    所以这里起一个心跳线程，定期往队列里塞一条 `events.PING`（SSE 注释行，
+    前端 readSSE 会跳过，完全透明）。间隔可配：config.SSE_HEARTBEAT_SEC，0 = 关。
     """
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue()
+    stop_beat = threading.Event()
 
     def push(event, data):
         try:
             loop.call_soon_threadsafe(queue.put_nowait, (event, data))
         except RuntimeError:
             pass                      # 事件循环已关（连接断了），丢掉即可
+
+    def beat():
+        # 不做"只在真正空闲时才发"的优化是刻意的：注释行只有 8 个字节，
+        # 而空闲判定要在两个线程间共享时间戳 —— 多一处状态就多一处不同步。
+        while not stop_beat.wait(config.SSE_HEARTBEAT_SEC):
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, (events.PING, None))
+            except RuntimeError:
+                return                # 事件循环已关，收工
 
     def body():
         try:
@@ -603,6 +624,8 @@ async def stream(run, cancel):
                 pass
 
     threading.Thread(target=body, daemon=True, name="msb-producer").start()
+    if config.SSE_HEARTBEAT_SEC > 0:
+        threading.Thread(target=beat, daemon=True, name="msb-heartbeat").start()
     try:
         while True:
             item = await queue.get()
@@ -610,4 +633,5 @@ async def stream(run, cancel):
                 break
             yield item
     finally:
+        stop_beat.set()
         cancel.cancel()

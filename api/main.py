@@ -138,6 +138,11 @@ def _banner():
         lines.append(f" LLM 选项: json_mode={cfg.get('json_mode')}  "
                      f"temperature={cfg.get('temperature')}  "
                      f"max_tokens={cfg.get('max_tokens')}")
+        # 提示词体积：以前只能手工量。示例越攒越多时，这个数决定"规则会不会被淹没"
+        # （窗口是 1M，撑不爆；要盯的是质量稀释，见 HANDOFF §8.59）。
+        st = llm.prompt_stats()
+        lines.append(f" 提示词  : {st['tokens']} token（{st['chars']} 字符，"
+                     f"其中示例 {st['example_tokens']}，预算 {st['budget']}）")
         if cfg.get("headers"):
             # 有些中转站不带浏览器头会 403，把"额外带了哪些头"打出来省得怀疑配置没生效
             lines.append(f" LLM 头  : {', '.join(sorted(cfg['headers']))}")

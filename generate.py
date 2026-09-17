@@ -208,6 +208,16 @@ def render_parallel(sb, name, args, use_latex, quality_dir):
 
 
 def main():
+    # ⚠️ 中文 Windows 的控制台是 GBK，而生成的源码里有 GBK 编不出的字符（模板注释里的
+    # ⚠ U+26A0、标题里的 ²、以及各种箭头符号）。`--dry-run` 要把整份源码 print 出来，
+    # 不处理就 UnicodeEncodeError 把命令整个崩掉 —— 实测**任何**示例都会崩（不是某个
+    # 示例的锅，2026-09-17 用 f1_space_surface.json 复现，崩在标题的 ² 上）。
+    # 这里只放宽**错误处理**、不改编码：能打的照常打，打不出的字符退化成 ?，
+    # 绝不因为"终端显示不出来"让命令失败（同 HANDOFF §3.2 那条 GBK 教训的输出侧）。
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:                                          # noqa: BLE001
+        pass
     ap = argparse.ArgumentParser(description="分镜 JSON → 讲解动画")
     ap.add_argument("storyboard", nargs="?", help="分镜 JSON 文件路径")
     ap.add_argument("-q", "--quality", default="l",

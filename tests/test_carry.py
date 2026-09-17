@@ -134,6 +134,47 @@ def test_split_middle_scene_tail_fade_excludes_next_carry():
     assert "self.play(FadeOut(Group(*self.mobjects)), run_time=0.35)" in parts[2][1]
 
 
+def test_carried_element_replaced_last_scene_survives_boundary():
+    """
+    上一镜**换过脸的**元素被承接时，边界清屏必须留住"屏幕上的那个新对象"。
+
+    背景（2026-09-17，卷积示例现场抓到的）：`replace` 只更新**本镜编译器**里的
+    id→变量换绑（`_Builder.alias`），而分镜边界的 `_keep` 是**渲染器**按
+    `dsl.var_name(id)` 直接拼的原始变量名。于是
+
+        self.play(FadeOut(_e_tb_out), FadeIn(_e_tb_out1))   # 屏上是 _e_tb_out1
+        _keep = [... _e_tb_out]                             # 保留的却是离场的旧对象
+
+    新对象被当成"上一镜的残留"淡掉 —— 装好的内容整块消失，下一镜末尾再 replace
+    一次才又出现，看起来就像"这个元素根本没 carry"。修法是 replace 后把原名
+    一并重绑（生成 `_e_tb_out = _e_tb_out1`），两边的名字才是同一个东西。
+    """
+    raw = {
+        "title": "carry 一个刚被 replace 过的元素",
+        "intent": "propose",
+        "scenes": [
+            {"id": 1,
+             "elements": [{"id": "tb", "kind": "table", "rows": [["", ""], ["", ""]]}],
+             "timeline": [
+                 {"do": "create", "target": "tb"},
+                 {"do": "replace", "target": "tb", "run_time": 0.5,
+                  "into": {"id": "tb2", "kind": "table", "rows": [["1", ""], ["", ""]]}},
+                 {"do": "wait", "time": 0.5}]},
+            {"id": 2,
+             "elements": [{"id": "tb", "carry": True}],
+             "timeline": [{"do": "indicate", "target": "tb"}]},
+        ],
+    }
+    src = renderer.render(schema.validate(raw, REG), use_latex=False)
+    # replace 之后原名必须重绑到新对象上（这一句在分镜 1 的体内）
+    assert "_e_tb = _e_tb2" in scene_of(src, 1), "replace 之后没有把原名重绑到新对象"
+    # 于是分镜 2 前导的清屏保留的 `_e_tb` 指的就是屏上那个装好数据的新表。
+    # ⚠️ 不清 `scene_of(src, 2)`：清屏片段排在 `scene 2 | dsl` 标记**之前**（它是
+    # "进这一镜前先做的准备"），按标记切会切掉它 —— 照老用例的写法整份找。
+    assert "_keep = [_e_tb]" in src
+    assert "_keep = [_e_tb]" in src.split("scene 2 | dsl")[0], "清屏片段不在分镜 2 前导位置"
+
+
 def test_no_carry_uses_the_original_snippets():
     """
     没有 carry 时，两条路径都必须**原样**沿用改动前那两段代码。
@@ -241,3 +282,56 @@ def test_expanded_form_is_accepted_but_mismatch_is_rejected():
         dict(once["scenes"][1]["elements"][1]),
     ]
     _err(broken, "和上一分镜里的不一致")
+
+
+# ==============================================================================
+# 3. 承接的元素引用了「上一镜的 tracker」（HANDOFF §8.46）
+# ==============================================================================
+def tracker_sb(second_elements=None):
+    """
+    两分镜：① 建 axes + tracker `s` + 引用它的点 `P`；② 按传入的 elements 写。
+
+    ⚠️ 分镜 1 必须把 `ax` 也 show 上屏：承接的元素与它依赖的元素都得**真的在屏上**，
+    否则会先撞上"承接了个不在屏上的东西"那条错误，把本用例要验的诊断淹掉。
+    """
+    return {
+        "title": "carry + tracker",
+        "intent": "propose",
+        "scenes": [
+            {"id": 1, "duration": 1.0,
+             "elements": [
+                 {"id": "s", "kind": "tracker", "value": 1.0},
+                 {"id": "ax", "kind": "axes", "x_range": [-2, 2, 1],
+                  "y_range": [-1, 4, 1]},
+                 {"id": "P", "kind": "dot",
+                  "at": {"ref": "ax", "x": "$s", "y": "s**2"}},
+             ],
+             "timeline": [{"do": "show", "target": ["s", "ax", "P"]},
+                          {"do": "wait", "time": 1.0}]},
+            {"id": 2, "duration": 1.0,
+             "elements": ([{"id": "ax", "carry": True}, {"id": "P", "carry": True}]
+                          if second_elements is None else second_elements),
+             "timeline": [{"do": "wait", "time": 1.0}]},
+        ],
+    }
+
+
+def test_carried_element_referencing_prev_tracker_is_explained():
+    """
+    承接的元素引用了**上一镜的 tracker**、却没承接那个 tracker —— 报错必须看得懂。
+
+    这是唯一一种「声明是从上一镜原样抄来的、名字也没写错，却过不了校验」的形态：
+    裸报"表达式 's' 里的 's' 未定义"会把人带去查拼写（照着规格写 few-shot 示例时，
+    我们自己就踩了一次，见 HANDOFF §8.46）。
+    """
+    msg = _err(tracker_sb(), "承接")
+
+    # ① 报的是 carry 的事，不再退化回裸的「未定义」
+    assert "tracker" in msg and "'s'" in msg
+    assert "未定义" not in msg, "carry 这种形态不该再退化成裸的「未定义」"
+    # ② 两条出路都在，且**推荐的（固定值重声明）排在前面**。
+    #    顺序反了，模型会挑省事的"把 tracker 也 carry"，把跳变带进成片。
+    assert "更稳" in msg and "carry" in msg
+    assert msg.index("更稳") < msg.index("也一起承接"), "推荐的出路没有排在前面"
+    # ③ 一个点的 x / y 是两条表达式，只该报一条（去重，别浪费回灌预算）
+    assert msg.count("两条出路") == 1, "carry 诊断重复报了"

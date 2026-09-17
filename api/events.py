@@ -91,7 +91,24 @@ def done(message_id):
     return "done", {"messageId": message_id}
 
 
+# 心跳：一条 SSE **注释行**（以 `:` 开头），只为"让连接上一直有字节在动"。
+#
+# 为什么是注释行而不是一个新的自定义事件：
+#   1. 前端的 readSSE 本来就跳过 `:` 开头的行（sse.ts::parseChunk 第一句），
+#      于是心跳对前端**完全透明** —— 不用改协议、不用加事件类型、旧前端也不会被它干扰；
+#   2. 它是纯粹的链路保活（防浏览器/网关把空闲连接掐掉），不是业务事件。
+#      冒充业务事件会污染事件契约，将来"事件列表"里就多一个没人处理的类型。
+#
+# 为什么需要它：见 config.SSE_HEARTBEAT_SEC —— 模型思考期间流上长时间没有任何数据，
+# 前端会看到一句"网络错误"，而任务其实还在跑。
+PING = "__ping__"
+
+
 async def encode_stream(agen):
     """把 (事件名, 数据) 的异步生成器编码成 SSE 文本流。"""
     async for event, data in agen:
-        yield sse(event, data)
+        if event == PING:
+            # 注释行也必须以空行结尾，否则会跟下一条事件粘成一段被前端整段丢弃
+            yield ": ping\n\n"
+        else:
+            yield sse(event, data)

@@ -131,8 +131,13 @@ def test_table_estimate_matches_manim():
     rows = [["0", "1", "2", "3", "4", "5", "6", "7"],
             ["1", "3", "5", "7", "9", "11", "13", "15"]]
     for fs in (20, 26, 30, 40):
+        # ⚠️ 必须用**渲染器实际会传的**留白建表：生成器会把 effective_pads() 的结果
+        # 显式传给 `MobjectTable(h_buff=…, v_buff=…)`，所以标定也得用同一组值 ——
+        # 否则就是"拿松留白去对紧留白"，估 ≥ 实测 那条断言会假失败。
         table = MobjectTable([[MarkupText(_markup(c), font=CN_FONT, font_size=fs)
-                               for c in r] for r in rows])
+                               for c in r] for r in rows],
+                             h_buff=metrics.PAD_X_DEFAULT,
+                             v_buff=metrics.PAD_Y_DEFAULT)
         est = metrics.est_table_size(rows, fs)
         assert est["w"] >= table.width - 1e-6, f"表宽估算偏小 fs={fs}: {est['w']:.3f} < {table.width:.3f}"
         assert est["h"] >= table.height - 1e-6, f"表高估算偏小 fs={fs}"

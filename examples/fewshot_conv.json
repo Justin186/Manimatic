@@ -1,0 +1,299 @@
+{
+  "_note": "few-shot 示例 3（表格类／卷积怎么算）的**源文件**。与示例 1、2 一样由 _example_from_file() 读进 system prompt，下划线开头的键会被剥掉。可直接验：python generate.py examples/fewshot_conv.json --name fewshot_conv；python -m pytest tests/test_normalize_idempotent.py。",
+  "_structure": "四镜的节拍：① 三张表一起摆出来（输入 ⊛ 卷积核 = 输出，输出是空的）→ ② 窗口停在左上，一对一对地把「输入的数」和「核里的数」抽到下方，补 × 和 +，排成 1×1 + 2×2 + 4×3 + 5×4 = 37，**算完立刻填进输出左上角** → ③ 窗口右移一格得 47，填进第二格 → ④ 再下移、再右移得 67 / 77，各算各填，最后四个数到位、收口到「对位相乘再相加」。⚠️ 三张表共用中心 y、三个标签共用 y：它们是一条水平线（3 行表与 2 行表没法既顶对齐又底对齐，居中让两边溢出相等，是唯一不偏的选择）。⚠️ 输出表用 cell_w/cell_h 定死 1.2×1.2、**全程 carry 一次不重建**；四个数字是独立元素（`place.cell` 锚在各自格子上），算完一个 `fade_in` 一个 —— **表格一动不动，只有数字冒出来**。（早先用 `replace` 换整张表，crossfade 会把边框和已有数字一起淡一遍，四个数分四镜填就闪四次 —— 用户 2026-09-17 反馈「输出表还是会中途淡入淡出」。）⚠️ 算式行的宽度与间距**全部实测**：宽度用 MathTex 真量，间距照 TeX 的天然规则（× 一侧 0.1415 / + 一侧 0.1132）；`×`/`+` 用 WHITE（它们是算式的一部分，不是旁注）；`= 37` 大一号（36）并补基线差 0.0267。⚠️ 所有数字都手算核对过：37 / 47 / 67 / 77。",
+  "brief": "卷积就是拿一个小窗口（卷积核）在输入网格上滑过去：每停一个位置，把窗口盖住的数和核里的数一一对位相乘，再全部加起来，得到输出的一个数。以 3×3 的输入和 2×2 的核 [[1,2],[3,4]] 为例：窗口停在左上角时盖住 1 2 / 4 5，于是 1×1 + 2×2 + 4×3 + 5×4 = 37，这就是输出的第一个数（填进左上角）；窗口右移一格得 2×1 + 3×2 + 5×3 + 6×4 = 47，再下移一行得 67、右下得 77。四个位置滑完，输出表就填满了 —— 规则从头到尾只有一条：对位相乘，再相加。",
+  "intent": "propose",
+  "outline": [
+    {"id": 1, "title": "输入、卷积核、输出", "durationSec": 8.6, "summary": "三张表一起摆出来（输入 ⊛ 核 = 输出），点出规则只有一条：对位相乘再相加"},
+    {
+      "id": 2, "title": "第一对数：抽出 1 和 1", "durationSec": 18.0,
+      "summary": "四对数成对抽出，补 × 和 +，排成 1×1 + 2×2 + 4×3 + 5×4 = 37，算完把这个数填进输出"
+    },
+    {"id": 3, "title": "右移一格得 47", "durationSec": 7.8, "summary": "窗口右移一格，同一套乘加得 47，填进输出的第二格"},
+    {"id": 4, "title": "滑完，输出填满", "durationSec": 15.2, "summary": "再下移、再右移，67 与 77 各算各填，四个数到位"}
+  ],
+  "title": "卷积：小窗口滑一遍，对位相乘再相加", "problem_type": "convolution",
+  "scenes": [
+    {
+      "id": 1, "duration": 8.6,
+      "_note": "引入镜：**三张表一开始就都在**（输入 ⊛ 卷积核 = 输出，输出是空的等着填）——用户反馈过「卷积核以及输出出现的时间太晚」。三张表共用中心 y = 0.6、三个标签共用 y = -1.05，所以它们是一条水平线，⊛ 和 = 都落在中线上。⚠️ 输出表用 cell_w/cell_h 定死 1.2×1.2：空表若靠内容撑会比填好后小，每填一个数表格就跳一次大小 —— 这正是 cell_w 该用的场合（跨镜保持格子尺寸）。duration = 1.4 + 1.0 + 0.8 + 1.0 + 1.2 + 1.0 + 1.2 + 1.0 = 8.6。",
+      "elements": [
+        {
+          "id": "tb_in", "kind": "table", "font_size": 30, "pad_x": 0.6,
+          "rows": [["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"]], "place": [{"at_point": [-4.3, 0.6]}],
+          "square": true
+        },
+        {
+          "id": "lb_in", "kind": "text", "content": "输入", "font_size": 22, "color": "GREY",
+          "place": [{"at_point": [-4.3, -1.05]}]
+        },
+        {
+          "id": "op1", "kind": "text", "content": "$\\circledast$", "font_size": 34, "color": "GREY",
+          "place": [{"at_point": [-2.55, 0.6]}]
+        },
+        {
+          "id": "tb_k", "kind": "table", "font_size": 30, "pad_x": 0.6, "rows": [["1", "2"], ["3", "4"]],
+          "place": [{"at_point": [-1.0, 0.6]}], "square": true
+        },
+        {
+          "id": "lb_k", "kind": "text", "content": "卷积核", "font_size": 22, "color": "GREY",
+          "place": [{"at_point": [-1.0, -1.05]}]
+        },
+        {
+          "id": "op2", "kind": "text", "content": "=", "font_size": 34, "color": "GREY",
+          "place": [{"at_point": [0.5, 0.6]}]
+        },
+        {
+          "id": "tb_out", "kind": "table", "font_size": 30, "pad_x": 0.6, "rows": [["", ""], ["", ""]],
+          "place": [{"at_point": [2.3, 0.6]}], "pad_y": 0.45, "cell_w": 1.2, "cell_h": 1.2
+        },
+        {
+          "id": "lb_out", "kind": "text", "content": "输出", "font_size": 22, "color": "GREY",
+          "place": [{"at_point": [2.3, -1.05]}]
+        },
+        {
+          "id": "cap", "kind": "text", "content": "拿一个小窗口在网格上滑过去，每个位置算一个数", "font_size": 28,
+          "place": [{"edge": "down", "buff": 0.8}]
+        }
+      ],
+      "timeline": [
+        {"do": "create", "target": "tb_in", "run_time": 1.4}, {"do": "create", "target": "tb_k", "run_time": 1.0},
+        {"do": "fade_in", "target": ["lb_in", "lb_k", "op1", "op2", "lb_out"], "run_time": 0.8},
+        {"do": "create", "target": "tb_out", "run_time": 1.0}, {"do": "write", "target": "cap", "run_time": 1.2},
+        {"do": "wait", "time": 1.0},
+        {
+          "do": "replace", "target": "cap",
+          "into": {
+            "id": "cap2", "kind": "text", "content": "规则只有一条：窗口里的数和核里的数对位相乘，再相加", "font_size": 28,
+            "place": [{"edge": "down", "buff": 0.8}]
+          },
+          "run_time": 1.2
+        },
+        {"do": "wait", "time": 1.0}
+      ]
+    },
+    {
+      "id": 2, "duration": 18.0,
+      "_note": "核心一镜：一对一对地抽 —— 「输入窗口里的第 i 个数」和「核里同位置的数」用 parallel 同时 move_to 到下方，随后补 ×，这一对之后再补 +（最后一对不补），四对排成 1 × 1 + 2 × 2 + 4 × 3 + 5 × 4 = 37。⚠️ 成对抽的理由：单抽一个数只看出「从哪里来」，成对抽才看出「谁和谁相乘」。⚠️ 算式槽位**全部实测**：宽度用 MathTex 真量，间距照 TeX 的天然规则（× 0.1415 / + 0.1132 一侧），不再手算、也不用 metrics 的估算上界。⚠️ 算完填进输出：**数字是独立元素**（o11，`place.cell` 贴在左上格），`fade_in` 它一个 —— 表格本身一动不动（见 outnum() 的说明）。元素 26 个、动作 22 条（含 4 组 parallel）。duration = 1.0+1.0+1.2+0.8+1.2+0.8 + 4×(0.9+0.4+0.4) + 1.0+1.0+1.2+1.2 = 18.0。",
+      "elements": [
+        {"id": "tb_in", "carry": true}, {"id": "lb_in", "carry": true}, {"id": "tb_k", "carry": true},
+        {"id": "lb_k", "carry": true}, {"id": "op1", "carry": true}, {"id": "op2", "carry": true},
+        {"id": "tb_out", "carry": true}, {"id": "lb_out", "carry": true},
+        {
+          "id": "wb", "kind": "cell_box", "of": "tb_in", "rows": [1, 2], "cols": [1, 2], "color": "RED",
+          "stroke_width": 4, "buff": 0.06
+        },
+        {
+          "id": "e1", "kind": "text", "content": "1", "font_size": 30,
+          "place": [{"cell": {"of": "tb_in", "row": 1, "col": 1}}]
+        },
+        {
+          "id": "e2", "kind": "text", "content": "2", "font_size": 30,
+          "place": [{"cell": {"of": "tb_in", "row": 1, "col": 2}}]
+        },
+        {
+          "id": "e3", "kind": "text", "content": "4", "font_size": 30,
+          "place": [{"cell": {"of": "tb_in", "row": 2, "col": 1}}]
+        },
+        {
+          "id": "e4", "kind": "text", "content": "5", "font_size": 30,
+          "place": [{"cell": {"of": "tb_in", "row": 2, "col": 2}}]
+        },
+        {
+          "id": "k1", "kind": "text", "content": "1", "font_size": 30,
+          "place": [{"cell": {"of": "tb_k", "row": 1, "col": 1}}]
+        },
+        {
+          "id": "k2", "kind": "text", "content": "2", "font_size": 30,
+          "place": [{"cell": {"of": "tb_k", "row": 1, "col": 2}}]
+        },
+        {
+          "id": "k3", "kind": "text", "content": "3", "font_size": 30,
+          "place": [{"cell": {"of": "tb_k", "row": 2, "col": 1}}]
+        },
+        {
+          "id": "k4", "kind": "text", "content": "4", "font_size": 30,
+          "place": [{"cell": {"of": "tb_k", "row": 2, "col": 2}}]
+        },
+        {
+          "id": "x1", "kind": "formula", "content": "\\times", "font_size": 30, "color": "WHITE",
+          "place": [{"at_point": [-2.125, -2.1]}]
+        },
+        {
+          "id": "p1", "kind": "formula", "content": "+", "font_size": 30, "color": "WHITE",
+          "place": [{"at_point": [-1.589, -2.1]}]
+        },
+        {
+          "id": "x2", "kind": "formula", "content": "\\times", "font_size": 30, "color": "WHITE",
+          "place": [{"at_point": [-1.031, -2.1]}]
+        },
+        {
+          "id": "p2", "kind": "formula", "content": "+", "font_size": 30, "color": "WHITE",
+          "place": [{"at_point": [-0.474, -2.1]}]
+        },
+        {
+          "id": "x3", "kind": "formula", "content": "\\times", "font_size": 30, "color": "WHITE",
+          "place": [{"at_point": [0.098, -2.1]}]
+        },
+        {
+          "id": "p3", "kind": "formula", "content": "+", "font_size": 30, "color": "WHITE",
+          "place": [{"at_point": [0.66, -2.1]}]
+        },
+        {
+          "id": "x4", "kind": "formula", "content": "\\times", "font_size": 30, "color": "WHITE",
+          "place": [{"at_point": [1.218, -2.1]}]
+        },
+        {
+          "id": "s1", "kind": "formula", "content": "= 37", "font_size": 36, "color": "ACCENT",
+          "place": [{"at_point": [2.074, -2.0733]}]
+        },
+        {"id": "cap", "kind": "text", "content": "窗口停在左上角时", "font_size": 28, "place": [{"edge": "down", "buff": 0.8}]},
+        {
+          "id": "o11", "kind": "text", "content": "37", "font_size": 30,
+          "place": [{"cell": {"of": "tb_out", "row": 1, "col": 1}}]
+        }
+      ],
+      "timeline": [
+        {"do": "write", "target": "cap", "run_time": 1.0}, {"do": "wait", "time": 1.0},
+        {"do": "create", "target": "wb", "run_time": 1.2},
+        {"do": "fade_in", "target": ["e1", "e2", "e3", "e4", "k1", "k2", "k3", "k4"], "run_time": 0.8},
+        {
+          "do": "replace", "target": "cap",
+          "into": {
+            "id": "cap2", "kind": "text", "content": "窗口里的数和核里的数，同位置的配成一对", "font_size": 28,
+            "place": [{"edge": "down", "buff": 0.8}]
+          },
+          "run_time": 1.2
+        },
+        {"do": "wait", "time": 0.8},
+        {
+          "do": "parallel",
+          "actions": [
+            {"do": "move_to", "target": "e1", "point": [-2.393, -2.1], "run_time": 0.9},
+            {"do": "move_to", "target": "k1", "point": [-1.857, -2.1], "run_time": 0.9}
+          ]
+        },
+        {"do": "fade_in", "target": "x1", "run_time": 0.4}, {"do": "fade_in", "target": "p1", "run_time": 0.4},
+        {
+          "do": "parallel",
+          "actions": [
+            {"do": "move_to", "target": "e2", "point": [-1.31, -2.1], "run_time": 0.9},
+            {"do": "move_to", "target": "k2", "point": [-0.752, -2.1], "run_time": 0.9}
+          ]
+        },
+        {"do": "fade_in", "target": "x2", "run_time": 0.4}, {"do": "fade_in", "target": "p2", "run_time": 0.4},
+        {
+          "do": "parallel",
+          "actions": [
+            {"do": "move_to", "target": "e3", "point": [-0.188, -2.1], "run_time": 0.9},
+            {"do": "move_to", "target": "k3", "point": [0.379, -2.1], "run_time": 0.9}
+          ]
+        },
+        {"do": "fade_in", "target": "x3", "run_time": 0.4}, {"do": "fade_in", "target": "p3", "run_time": 0.4},
+        {
+          "do": "parallel",
+          "actions": [
+            {"do": "move_to", "target": "e4", "point": [0.939, -2.1], "run_time": 0.9},
+            {"do": "move_to", "target": "k4", "point": [1.503, -2.1], "run_time": 0.9}
+          ]
+        },
+        {"do": "fade_in", "target": "x4", "run_time": 0.4}, {"do": "write", "target": "s1", "run_time": 1.0},
+        {"do": "wait", "time": 1.0},
+        {
+          "do": "replace", "target": "cap",
+          "into": {
+            "id": "cap3", "kind": "text", "content": "算出来是 37 —— 填进输出的左上角", "font_size": 28,
+            "place": [{"edge": "down", "buff": 0.8}]
+          },
+          "run_time": 1.2
+        },
+        {"do": "fade_in", "target": "o11", "run_time": 1.2}, {"do": "wait", "time": 1.2}
+      ]
+    },
+    {
+      "id": 3, "duration": 7.8,
+      "_note": "第二个数：窗口右移一格（move_cells 改 cols），算式在字幕里给出，算完把 47 填进输出表的第二格。⚠️ 这一镜**不重复演示成对抽取** —— 方法在镜 2 已经讲透，重复会拖沓；重点是「又得到一个数、又填进去一个」。duration = 1.2 + 1.2 + 1.0 + 1.2 + 0.8 + 1.2 + 1.2 = 7.8。",
+      "elements": [
+        {"id": "tb_in", "carry": true}, {"id": "lb_in", "carry": true}, {"id": "tb_k", "carry": true},
+        {"id": "lb_k", "carry": true}, {"id": "op1", "carry": true}, {"id": "op2", "carry": true},
+        {"id": "tb_out", "carry": true}, {"id": "lb_out", "carry": true}, {"id": "wb", "carry": true},
+        {"id": "o11", "carry": true},
+        {
+          "id": "o12", "kind": "text", "content": "47", "font_size": 30,
+          "place": [{"cell": {"of": "tb_out", "row": 1, "col": 2}}]
+        },
+        {
+          "id": "cap", "kind": "text", "content": "窗口右移一格，盖住的是 2 3 / 5 6", "font_size": 28,
+          "place": [{"edge": "down", "buff": 0.8}]
+        }
+      ],
+      "timeline": [
+        {"do": "write", "target": "cap", "run_time": 1.2},
+        {"do": "move_cells", "target": "wb", "of": "tb_in", "rows": [1, 2], "cols": [2, 3], "run_time": 1.2},
+        {"do": "wait", "time": 1.0},
+        {
+          "do": "replace", "target": "cap",
+          "into": {
+            "id": "cap2", "kind": "text", "content": "同一套乘加：2×1 + 3×2 + 5×3 + 6×4 = 47", "font_size": 28,
+            "place": [{"edge": "down", "buff": 0.8}]
+          },
+          "run_time": 1.2
+        },
+        {"do": "wait", "time": 0.8}, {"do": "fade_in", "target": "o12", "run_time": 1.2}, {"do": "wait", "time": 1.2}
+      ]
+    },
+    {
+      "id": 4, "duration": 15.2,
+      "_note": "后两个数：窗口先下移一行、再右移一格，67 与 77 各算各填 —— 每算完一个就 replace 输出表一次，四个数逐个到位。最后一句收口回到唯一那条规则。⚠️ 输出表全程用同一套 cell_w/cell_h + 同一个 at_point，所以三次 replace 位置上完全不动，只有格子里多出一个数。duration = 1.2+1.2+0.8+1.2+0.8+1.2+1.2+0.8+1.2+0.8+1.2+1.2+1.2+1.2 = 15.2。",
+      "elements": [
+        {"id": "tb_in", "carry": true}, {"id": "lb_in", "carry": true}, {"id": "tb_k", "carry": true},
+        {"id": "lb_k", "carry": true}, {"id": "op1", "carry": true}, {"id": "op2", "carry": true},
+        {"id": "tb_out", "carry": true}, {"id": "lb_out", "carry": true}, {"id": "wb", "carry": true},
+        {"id": "o11", "carry": true}, {"id": "o12", "carry": true},
+        {
+          "id": "o21", "kind": "text", "content": "67", "font_size": 30,
+          "place": [{"cell": {"of": "tb_out", "row": 2, "col": 1}}]
+        },
+        {
+          "id": "o22", "kind": "text", "content": "77", "font_size": 30,
+          "place": [{"cell": {"of": "tb_out", "row": 2, "col": 2}}]
+        },
+        {"id": "cap", "kind": "text", "content": "窗口先下移一行", "font_size": 28, "place": [{"edge": "down", "buff": 0.8}]}
+      ],
+      "timeline": [
+        {"do": "write", "target": "cap", "run_time": 1.2},
+        {"do": "move_cells", "target": "wb", "of": "tb_in", "rows": [2, 3], "cols": [1, 2], "run_time": 1.2},
+        {"do": "wait", "time": 0.8},
+        {
+          "do": "replace", "target": "cap",
+          "into": {
+            "id": "cap2", "kind": "text", "content": "4×1 + 5×2 + 7×3 + 8×4 = 67", "font_size": 28,
+            "place": [{"edge": "down", "buff": 0.8}]
+          },
+          "run_time": 1.2
+        },
+        {"do": "wait", "time": 0.8}, {"do": "fade_in", "target": "o21", "run_time": 1.2},
+        {"do": "move_cells", "target": "wb", "of": "tb_in", "rows": [2, 3], "cols": [2, 3], "run_time": 1.2},
+        {"do": "wait", "time": 0.8},
+        {
+          "do": "replace", "target": "cap",
+          "into": {
+            "id": "cap3", "kind": "text", "content": "5×1 + 6×2 + 8×3 + 9×4 = 77", "font_size": 28,
+            "place": [{"edge": "down", "buff": 0.8}]
+          },
+          "run_time": 1.2
+        },
+        {"do": "wait", "time": 0.8}, {"do": "fade_in", "target": "o22", "run_time": 1.2}, {"do": "wait", "time": 1.2},
+        {
+          "do": "replace", "target": "cap",
+          "into": {
+            "id": "cap4", "kind": "text", "content": "四个都填进去了 —— 规则从头到尾只有一条：对位相乘，再相加", "font_size": 28,
+            "place": [{"edge": "down", "buff": 0.8}]
+          },
+          "run_time": 1.2
+        },
+        {"do": "wait", "time": 1.2}
+      ]
+    }
+  ]
+}

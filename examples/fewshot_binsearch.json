@@ -1,0 +1,136 @@
+{
+  "_note": "few-shot 示例 3（表格类／二分查找）的**源文件**。与示例 1、2 一样由 _example_from_file() 读进 system prompt，下划线开头的键会被剥掉。可直接验：python generate.py examples/fewshot_binsearch.json --name fewshot_binsearch；python -m pytest tests/test_normalize_idempotent.py。这一条取代了原先的「卷积」小示例（用户反馈：表格类有问题；旧版的窗口算式还写错了项）。",
+  "_structure": "四镜的节拍：① 引入（摆出 8 个有序数 + 点出「逐个找太慢，从中间开始一次扔掉一半」）→ ② 第一轮（给候选范围套 cell_box → 取中点 a₄=15 → 23 比 15 大，左半边全不可能 → move_cells 把范围缩到右半）→ ③ 第二轮（中点框移到 a₆ = 23，命中）→ ④ 收口（8 个数只看了两个；每次砍一半 ⇒ 最多 log₂8 = 3 次）。⚠️ 这条示例专门示范**表格类**的正确写法：**格子尺寸让内容撑**（只写 pad_x: 0.4 让它紧凑），**不写 cell_w/cell_h** —— 用户 2026-09-17 反馈的「表格太大、单元格太大」就是模型写了 cell_w: 3.6（3 列 → 整表 10.8，占画面 76%）造成的。这张 2×8 的表算出来约 6.0 × 1.6（占画面 42% × 20%），才是表格该有的样子。⚠️ 另一个要示范的是 cell_box 的**独有能力**：框的大小随格子走 —— 候选范围从 8 格缩到 4 格，只要一句 move_cells，位置和宽度都由格子算，不存在「自己估坐标」的错位。",
+
+  "brief": "二分查找就是在有序数组里「每次砍一半」地找：先看中间那个数，比它大就把左半边整个扔掉，比它小就扔掉右半边。以在 [3, 7, 11, 15, 19, 23, 27, 31] 里找 23 为例：中间是第 4 个数 15，23 比 15 大，所以只可能在右半边；再看右半边的中间（第 6 个）正好是 23，两次就找到了。8 个数里本来要一个个比，最多也就比 log₂8 = 3 次。",
+  "intent": "propose",
+  "outline": [
+    { "id": 1, "title": "8 个有序数里找一个", "durationSec": 5.8, "summary": "摆出数组和下标，点出逐个找太慢，从中间开始一次就能扔掉一半" },
+    { "id": 2, "title": "第一轮：砍掉左半边", "durationSec": 10.6, "summary": "候选范围套上框，取中点 a₄=15；23 比 15 大，范围缩到右半 4 格" },
+    { "id": 3, "title": "第二轮：正好命中", "durationSec": 7.4, "summary": "剩下的 4 格里取中间 a₆ = 23，正是要找的数" },
+    { "id": 4, "title": "为什么快", "durationSec": 5.6, "summary": "8 个数只比了两次；每次砍一半，最多 log₂8 = 3 次" }
+  ],
+  "title": "二分查找：每次砍掉一半",
+  "problem_type": "binary_search",
+
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 5.8,
+      "_note": "引入镜：表格本身就是题目（下标行 + 数值行），不是标题卡。第二句点出「为什么不能一个个找」，为下面的「砍一半」立靶子。⚠️ 表格只写了 pad_x: 0.4（紧凑），**没有 cell_w/cell_h** —— 2 行 × 8 列由内容撑出约 6.0 × 1.6，放画面中间偏上，给字幕和后面的公式留位置。duration = 1.4 + 1.2 + 1.0 + 1.2 + 1.0 = 5.8。",
+      "elements": [
+        { "id": "tb", "kind": "table", "font_size": 26, "pad_x": 0.4,
+          "rows": [["1","2","3","4","5","6","7","8"],
+                   ["3","7","11","15","19","23","27","31"]],
+          "place": [{ "center": true }, { "shift": [0, 0.6] }] },
+        { "id": "cap", "kind": "text",
+          "content": "在 8 个有序的数里找 23",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "create", "target": "tb", "run_time": 1.4 },
+        { "do": "write", "target": "cap", "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "逐个找太慢 —— 从中间开始，一次就能扔掉一半",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+
+    {
+      "id": 2,
+      "duration": 10.6,
+      "_note": "第一轮：这一镜是全片重点 —— cell_box 框住候选范围（开始时是全部 8 格），取中点 a₄，然后 move_cells 把范围缩到右半 4 格。⚠️ 两个框都不用管坐标：rb 框 rows=[1,2] cols=[1..8]，mb 框 cols=[4]，缩范围只要 move_cells(rb, cols=[5,6,7,8]) —— 位置和宽度都由格子算（这就是「别用 rect 自己估坐标框格子」那条规矩的正例）。⚠️ 字幕跟运动走：先说「23 比 15 大，左半边全都不可能」，**再**动框。duration = 1.2 + 1.0 + 1.0 + 1.2 + 1.0 + 0.8 + 1.2 + 1.0 + 1.2 + 1.0 = 10.6。",
+      "elements": [
+        { "id": "tb", "carry": true },
+        { "id": "rb", "kind": "cell_box", "of": "tb", "rows": [1, 2],
+          "cols": [1, 2, 3, 4, 5, 6, 7, 8], "color": "RED", "stroke_width": 3 },
+        { "id": "mb", "kind": "cell_box", "of": "tb", "rows": [1, 2],
+          "cols": [4], "color": "GOLD", "stroke_width": 4, "buff": 0.08 },
+        { "id": "cap", "kind": "text",
+          "content": "先给候选范围套个框",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "create", "target": "rb", "run_time": 1.0 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "取中间那个：第 4 个是 15",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "create", "target": "mb", "run_time": 0.8 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap3", "kind": "text",
+                    "content": "23 比 15 大 —— 左半边全都不可能",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "move_cells", "target": "rb", "of": "tb", "rows": [1, 2],
+          "cols": [5, 6, 7, 8], "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+
+    {
+      "id": 3,
+      "duration": 7.4,
+      "_note": "第二轮：范围只剩 4 格，中点框 move_cells 到第 6 格 —— 正好是 23。⚠️ 这里刻意**不再动 rb**：它的大小已经是「4 格」，正是我们要的；只有中点框在动。命中用 indicate 闪一下，不用再开一镜喊结论。duration = 1.0 + 1.0 + 1.2 + 1.2 + 1.0 + 1.0 + 1.0 = 7.4。",
+      "elements": [
+        { "id": "tb", "carry": true },
+        { "id": "rb", "carry": true },
+        { "id": "mb", "carry": true },
+        { "id": "cap", "kind": "text",
+          "content": "再取剩下的中间",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "move_cells", "target": "mb", "of": "tb", "rows": [1, 2],
+          "cols": [6], "run_time": 1.2 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "这次是第 6 个 —— 正是要找的 23",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "indicate", "target": "mb", "run_time": 1.0 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+
+    {
+      "id": 4,
+      "duration": 5.6,
+      "_note": "收口镜：把「快」这件事说清楚 —— 8 个数看了 2 个，而最坏情况是 log₂8 = 3 次。表格与两个框都 carry 过来（结论要和画面上的东西对上），不再加新图形。duration = 1.2 + 1.0 + 1.0 + 1.2 + 1.2 = 5.6。",
+      "elements": [
+        { "id": "tb", "carry": true },
+        { "id": "rb", "carry": true },
+        { "id": "mb", "carry": true },
+        { "id": "eq", "kind": "formula", "content": "\\log_2 8 = 3",
+          "font_size": 32, "color": "ACCENT",
+          "place": [{ "corner": "ur", "buff": 0.8 }] },
+        { "id": "cap", "kind": "text",
+          "content": "8 个数，只看了两个就找到了",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "write", "target": "eq", "run_time": 1.0 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "每比一次就扔掉一半 —— 这就是二分查找",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.2 }
+      ]
+    }
+  ]
+}

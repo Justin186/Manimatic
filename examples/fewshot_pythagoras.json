@@ -1,0 +1,212 @@
+{
+  "_note": "few-shot 示例 2（几何题／赵爽弦图证明勾股定理）的**源文件**。与示例 1 同样由 _example_from_file() 读进 system prompt，下划线开头的键会被剥掉。可直接验：python generate.py examples/fewshot_pythagoras.json --name fewshot_pythagoras（渲染），python -m pytest tests/test_normalize_idempotent.py（校验 + 幂等）。这一条取代了原先的「割补法求三角形面积」（用户反馈：太简单，只是套一次公式）。",
+  "_structure": "四镜的节拍：① 引入（画一个直角三角形、标 a/b/c，说明要证的是 c²=a²+b² 对**任意**直角三角形成立 —— 拿 3、4、5 试一遍不算证明）→ ② 拼接（四个全等直角三角形先叠着淡入，再旋转 + 平移到四条边上，斜边围成边长 c 的大正方形，中间空出一个小正方形）→ ③ 两种算法（大正方形：边长×边长 = c²；四个三角形 + 小正方形 = 4·(ab/2) + (b−a)²，量的是同一块地故相等）→ ④ 代数化简（c² = 2ab + (b−a)² = 2ab + b² − 2ab + a² = a² + b²，每行右侧带旁注）并收口。⚠️ 全程没有 axes：几何题只画图形本身。⚠️ 引入镜特意点破「验证 ≠ 证明」，这是这道题真正的难点，也是它比「割补法求面积」深一层的地方。",
+
+  "brief": "勾股定理是 c² = a² + b²，但拿 3、4、5 试一遍不算证明 —— 得对任意直角三角形都成立。赵爽弦图的做法：拿四个一模一样的直角三角形（直角边 a、b，斜边 c），把四条斜边朝外拼成一个大正方形。这个大正方形有两种算法：按边长算是 c²；按组成算，是四个三角形 4·(ab/2) 加上中间空出来的小正方形 (b−a)²。两者是同一块地，所以相等：c² = 2ab + (b−a)²，展开得 2ab + b² − 2ab + a²，把 2ab 抵掉就是 a² + b²。整条推导没有用到 a、b 的具体数值，所以对任意直角三角形都成立。",
+  "intent": "propose",
+  "outline": [
+    { "id": 1, "title": "要证的是什么", "durationSec": 6.6, "summary": "画一个直角三角形、标出 a / b / c，点明要证 c² = a² + b² 对任意直角三角形成立 —— 验证 3、4、5 不算证明" },
+    { "id": 2, "title": "四个三角形拼出 c²", "durationSec": 8.6, "summary": "四个全等三角形叠着淡入，再旋转 + 平移到四条边上：斜边围成边长 c 的大正方形，中间空出边长 b−a 的小正方形" },
+    { "id": 3, "title": "同一块地，两种算法", "durationSec": 7.6, "summary": "大正方形按边长算是 c²，按组成算是 4·(ab/2) + (b−a)² —— 两者必须相等" },
+    { "id": 4, "title": "化简到底", "durationSec": 8.6, "summary": "把右边展开、合并同类项：c² = 2ab + (b−a)² = a² + b²，收口到「推导里没有用到具体数值」" }
+  ],
+  "title": "赵爽弦图：勾股定理的证明",
+  "problem_type": "geometry",
+
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 6.6,
+      "_note": "引入镜，**不是标题卡**：先画一个直角三角形并标 a / b / c（三条边都是符号，不写具体长度 —— 这道题要证的是「对任意直角三角形都成立」），再用一句字幕点破难点：拿 3、4、5 试一遍只是验证，不算证明。⚠️ 这一镜的三条边长是 2.7 / 3.6 / 4.5（画布单位）= 3 / 4 / 5 乘 0.9 —— 下面的弦图用的是同一个形状，所以「四个一模一样的三角形」这句话在画面上是**真的**。duration = 1.4 + 0.8 + 1.2 + 1.0 + 1.2 + 1.0 = 6.6。",
+      "elements": [
+        { "id": "t1", "kind": "polygon", "points": [[-3.45,0.42],[1.05,0.42],[-1.83,2.58]],
+          "color": "PRIMARY", "stroke_width": 3.5, "fill_opacity": 0.3 },
+        { "id": "la", "kind": "text", "content": "$a$", "font_size": 26,
+          "place": [{ "at_point": [-2.96,1.74] }] },
+        { "id": "lb", "kind": "text", "content": "$b$", "font_size": 26,
+          "place": [{ "at_point": [-0.15,1.82] }] },
+        { "id": "lc", "kind": "text", "content": "$c$", "font_size": 26,
+          "place": [{ "at_point": [-1.2,-0.05] }] },
+        { "id": "cap", "kind": "text",
+          "content": "要证的是 $c^2 = a^2 + b^2$ —— 对任意直角三角形",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "create", "target": "t1", "run_time": 1.4 },
+        { "do": "fade_in", "target": ["la", "lb", "lc"], "run_time": 0.8 },
+        { "do": "write", "target": "cap", "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "拿 3、4、5 试一遍不算证明 —— 得让任意的 $a$、$b$ 都成立",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+
+    {
+      "id": 2,
+      "duration": 8.6,
+      "_note": "拼接镜，也是全片的核心画面。四块三角形都**以基准块的朝向**声明（就是 t1 的形状平移过去），起始位是四张「叠着的牌」；然后**每块的 `rotate` 和 `move_to` 写进同一个 parallel 组**（同 target）—— dsl 会把这一对合成**一次刚体运动**：`Rotate(m, θ, about_point=<算出来的支点>)`，转角和位移一次完成，既不形变也不打架（`x.animate.rotate()` 是逐点插值，转 180° 时图形会从中间塌过去 —— 用户 2026-09-17 反馈的「旋转时发生形变」就是这个，已在 dsl 层修掉）。⚠️ 为什么角度正好是 90° 的倍数：基准块直接取自 T1 的朝向，四个目标互为 90° 旋转。⚠️ 为什么 move_to 的目标是 **bbox 中心**（不是顶点平均）：manim 的 get_center() 就是包围盒中心，rotate 也绕它转 —— 用顶点平均对不上，四块会拼出缝。⚠️ 镜 1 的 a / b / c 标注**故意不 carry**：它们在这一镜已经没用了（数字都被四块拼图取代），留着只是噪音（用户上一轮反馈：中间量用完要退场）。⚠️ **四块用两色相间**（蓝 / 青，fill 0.3）而不是同色：弦图里相邻两块的同名腿是**共线**的，同色 + 同填充会糊成「一个被划了 X 的方块」，看不出是四个三角形 —— 而「四个全等」正是这一镜要讲的事。（这也就是「青朱出入图」名字的由来：两块青、两块朱。）duration = 1.2 + 1.0 + 0.8 + 1.6 + 1.0 + 0.8 + 1.2 + 1.0 = 8.6。",
+      "elements": [
+        { "id": "t1", "carry": true },
+        { "id": "t2", "kind": "polygon", "points": [[-3.15,-0.28],[1.35,-0.28],[-1.53,1.88]],
+          "color": "TEAL", "stroke_width": 3.5, "fill_opacity": 0.3 },
+        { "id": "t3", "kind": "polygon", "points": [[-2.85,-0.98],[1.65,-0.98],[-1.23,1.18]],
+          "color": "PRIMARY", "stroke_width": 3.5, "fill_opacity": 0.3 },
+        { "id": "t4", "kind": "polygon", "points": [[-2.55,-1.68],[1.95,-1.68],[-0.93,0.48]],
+          "color": "TEAL", "stroke_width": 3.5, "fill_opacity": 0.3 },
+
+        { "id": "box", "kind": "polygon", "points": [[-3.25,-1.95],[1.25,-1.95],[1.25,2.55],[-3.25,2.55]],
+          "color": "GREY", "stroke_width": 2.5 },
+        { "id": "hole", "kind": "polygon", "points": [[-1.63,0.21],[-0.91,-0.33],[-0.37,0.39],[-1.09,0.93]],
+          "color": "GOLD", "stroke_width": 3, "fill_opacity": 0.2 },
+        { "id": "lab_c", "kind": "text", "content": "$c$", "font_size": 26,
+          "place": [{ "at_point": [-1.0,-2.4] }] },
+        { "id": "lab_hole", "kind": "text", "content": "$b-a$", "font_size": 22,
+          "color": "GOLD", "place": [{ "at_point": [-1.0,0.3] }] },
+        { "id": "la2", "kind": "text", "content": "$a$", "font_size": 24,
+          "place": [{ "at_point": [-2.12,-1.11] }] },
+        { "id": "lb2", "kind": "text", "content": "$b$", "font_size": 24,
+          "place": [{ "at_point": [-0.43,-1.19] }] },
+
+        { "id": "cap", "kind": "text",
+          "content": "用四个一模一样的直角三角形，斜边朝外拼",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 },
+        { "do": "fade_in", "target": ["t2", "t3", "t4"], "run_time": 0.8 },
+        { "do": "parallel", "actions": [
+          { "do": "rotate",  "target": "t1", "angle": 0,   "run_time": 1.6 },
+          { "do": "move_to", "target": "t1", "point": [-1.00, -0.87], "run_time": 1.6 },
+          { "do": "rotate",  "target": "t2", "angle": 90,  "run_time": 1.6 },
+          { "do": "move_to", "target": "t2", "point": [0.17, 0.30],   "run_time": 1.6 },
+          { "do": "rotate",  "target": "t3", "angle": 180, "run_time": 1.6 },
+          { "do": "move_to", "target": "t3", "point": [-1.00, 1.47],  "run_time": 1.6 },
+          { "do": "rotate",  "target": "t4", "angle": 270, "run_time": 1.6 },
+          { "do": "move_to", "target": "t4", "point": [-2.17, 0.30],  "run_time": 1.6 } ] },
+        { "do": "create", "target": "box", "run_time": 1.0 },
+        { "do": "fade_in", "target": ["hole", "lab_c", "lab_hole", "la2", "lb2"], "run_time": 0.8 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "四条斜边围成边长 $c$ 的大正方形；中间的小正方形，边长就是两条直角边之差 $b-a$",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+
+    {
+      "id": 3,
+      "duration": 7.6,
+      "_note": "两种算法镜：大正方形按边长算是 c²，按组成算是 4·(ab/2) + (b−a)²。两行式子**贴着图形右侧**排（next_to(box, right, aligned=top)），这样观众一眼能把「式子」和「图上那块」对上。⚠️ 算式字号 30 / 28，比上一版（割补法）的 24 大一档 —— 用户反馈过「左上角的算式有点小」。⚠️ f1 / f2 在这一镜之后**不 carry**（镜 4 的推导会重新写一遍），也是「中间量用完退场」。duration = 1.2 + 1.0 + 0.8 + 1.2 + 1.2 + 1.2 + 1.0 = 7.6。",
+      "elements": [
+        { "id": "t1", "carry": true },
+        { "id": "t2", "carry": true },
+        { "id": "t3", "carry": true },
+        { "id": "t4", "carry": true },
+        { "id": "box", "carry": true },
+        { "id": "hole", "carry": true },
+        { "id": "lab_c", "carry": true },
+        { "id": "lab_hole", "carry": true },
+        { "id": "la2", "carry": true },
+        { "id": "lb2", "carry": true },
+
+        { "id": "f1", "kind": "formula", "content": "c^2",
+          "font_size": 30, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "box", "direction": "right", "buff": 0.35,
+                                   "aligned": "top" } }] },
+        { "id": "n1", "kind": "text", "content": "边长 × 边长", "font_size": 24,
+          "color": "GREY",
+          "place": [{ "next_to": { "of": "f1", "direction": "right", "buff": 0.4 } }] },
+        { "id": "f2", "kind": "formula", "content": "4 \\times \\frac{ab}{2} + (b-a)^2",
+          "font_size": 28, "color": "WHITE",
+          "place": [{ "next_to": { "of": "f1", "direction": "down", "buff": 0.6,
+                                   "aligned": "left" } }] },
+
+        { "id": "cap", "kind": "text",
+          "content": "大正方形有两种算法",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.2 },
+        { "do": "write", "target": "f1", "run_time": 1.0 },
+        { "do": "write", "target": "n1", "run_time": 0.8 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "第二种：四个三角形 + 中间的小正方形",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "write", "target": "f2", "run_time": 1.2 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap3", "kind": "text",
+                    "content": "量的是同一块地 —— 两个式子必须相等",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    },
+
+    {
+      "id": 4,
+      "duration": 8.6,
+      "_note": "代数化简镜：三行推导左对齐串起来（next_to(down, aligned=left)），每行右侧一句 GREY 旁注说这一步在干什么 —— 推导类画面每一步都要有注释（示例 1 镜 4 立的规矩）。最后一行用 ACCENT 单独上色：它是结论。⚠️ 这一镜**不 carry f1 / f2**：推导的第一行已经把两个算法接到一起，旧式子留着只会和推导抢位置（用户反馈：右上角的 4×4=16 没消失）。⚠️ 图形本身（四块 + 外框 + 小方块 + 两个标注）全部 carry —— 代数那一步得让人看得见图上对应的东西，这是「两条路互相印证」。duration = 1.0 + 1.0 + 0.8 + 1.0 + 0.8 + 1.0 + 0.8 + 1.2 + 1.0 = 8.6。",
+      "elements": [
+        { "id": "t1", "carry": true },
+        { "id": "t2", "carry": true },
+        { "id": "t3", "carry": true },
+        { "id": "t4", "carry": true },
+        { "id": "box", "carry": true },
+        { "id": "hole", "carry": true },
+        { "id": "lab_c", "carry": true },
+        { "id": "lab_hole", "carry": true },
+        { "id": "la2", "carry": true },
+        { "id": "lb2", "carry": true },
+
+        { "id": "s1", "kind": "formula", "content": "c^2 = 2ab + (b-a)^2",
+          "font_size": 28, "color": "WHITE",
+          "place": [{ "next_to": { "of": "box", "direction": "right", "buff": 0.35,
+                                   "aligned": "top" } }] },
+        { "id": "a1", "kind": "text", "content": "$\\leftarrow$ 先算 $2ab$",
+          "font_size": 24, "color": "GREY",
+          "place": [{ "next_to": { "of": "s1", "direction": "right", "buff": 0.3 } }] },
+        { "id": "s2", "kind": "formula", "content": "= 2ab + b^2 - 2ab + a^2",
+          "font_size": 28, "color": "WHITE",
+          "place": [{ "next_to": { "of": "s1", "direction": "down", "buff": 0.3,
+                                   "aligned": "left" } }] },
+        { "id": "a2", "kind": "text", "content": "$\\leftarrow$ 展开平方",
+          "font_size": 24, "color": "GREY",
+          "place": [{ "next_to": { "of": "s2", "direction": "right", "buff": 0.3 } }] },
+        { "id": "s3", "kind": "formula", "content": "= a^2 + b^2",
+          "font_size": 28, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "s2", "direction": "down", "buff": 0.3,
+                                   "aligned": "left" } }] },
+        { "id": "a3", "kind": "text", "content": "$\\leftarrow$ $2ab$ 抵掉",
+          "font_size": 24, "color": "GREY",
+          "place": [{ "next_to": { "of": "s3", "direction": "right", "buff": 0.3 } }] },
+
+        { "id": "cap", "kind": "text",
+          "content": "把右边展开、合并同类项",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "write", "target": "s1", "run_time": 1.0 },
+        { "do": "write", "target": "a1", "run_time": 0.8 },
+        { "do": "write", "target": "s2", "run_time": 1.0 },
+        { "do": "write", "target": "a2", "run_time": 0.8 },
+        { "do": "write", "target": "s3", "run_time": 1.0 },
+        { "do": "write", "target": "a3", "run_time": 0.8 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "所以 $c^2 = a^2 + b^2$ —— 推导里没有用到具体数值，对任意直角三角形都成立",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 1.0 }
+      ]
+    }
+  ]
+}

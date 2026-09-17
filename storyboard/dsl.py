@@ -118,6 +118,17 @@ DIRECTIONS = {
 
 EDGES = {"up": "UP", "down": "DOWN", "left": "LEFT", "right": "RIGHT"}
 
+# 「对齐边」在规范里写的是**边的说法**（left/right/top/bottom，见 place.next_to.aligned
+# 与 group.aligned），而 manim 的 `aligned_edge` 收的是**方向常量**（LEFT/UP/...）。
+# ⚠️ 2026-09-17 修：这里原来直接 `.upper()`，于是 `aligned: "bottom"` 生成出
+# `aligned_edge=BOTTOM` —— 一个不存在的名字：校验层全绿，渲染期才 `NameError`。
+# （示例里「让两个分式的分母同底」正是靠 bottom 对齐，一撞就炸。）
+# 顺手也认 up/down（和 top/bottom 同义，模型常这么写）。
+ALIGNED_EDGES = {
+    "left": "LEFT", "right": "RIGHT", "top": "UP", "bottom": "DOWN",
+    "up": "UP", "down": "DOWN", "center": "ORIGIN",
+}
+
 ANCHORS = {
     "center": "get_center()", "top": "get_top()", "bottom": "get_bottom()",
     "left": "get_left()", "right": "get_right()",
@@ -325,16 +336,74 @@ def formula(s, **kw):
       1. 无 LaTeX 环境  → Text 兜底（保证不崩）
       2. 纯 LaTeX       → MathTex（快）
       3. 含中文         → Tex + ctex 模板（xelatex），公式里可直接嵌中文
+
+    ⚠️ 2026-09-17：模板一律带上 xcolor（+ 项目调色板的 \\definecolor），
+    这样公式里可以写 `{\\color{ACCENT}\\Delta x}` 给**个别符号**单独上色
+    （元素上要同时写 "tex_colors": true，见 §8.49）。
     """
     if not USE_LATEX:
         # 降级也不能把 LaTeX 源码糊在屏幕上：先清理成人能读的记号
         return _text(_plain_tex(s), **kw)
     if not _has_cjk(s):
-        return MathTex(s, **kw)
+        return MathTex(s, tex_template=_tex_template(), **kw)
     try:
-        return Tex(f"${s}$", tex_template=TexTemplateLibrary.ctex, **kw)
+        return Tex(f"${s}$", tex_template=_ctex_template(), **kw)
     except Exception:
         return _text(_plain_tex(s), **kw)
+
+
+# 公式内分色要用的调色板名（只列**纯字母**的：xcolor 的 \\definecolor 对下划线
+# 名字不保证可用，所以 BLUE_A / GREY_BROWN 这类不往 LaTeX 里搬）。
+_TEX_PALETTE = ("PRIMARY", "SECONDARY", "ACCENT", "RED", "ORANGE", "TEAL",
+                "GREEN", "GOLD", "PURPLE", "PINK", "BLUE", "YELLOW",
+                "WHITE", "GREY", "BLACK")
+_TEX_TEMPLATE_CACHE = None
+_CTEX_TEMPLATE_CACHE = None
+
+
+def _tex_template():
+    """
+    带 xcolor + 项目调色板的 Tex 模板。
+
+    manim 默认模板**没有** xcolor，所以用 `\\color{...}` 的公式会直接编译失败
+    （实测：`Undefined control sequence`，整个分镜渲不出来）。颜色值从 manim 的
+    同名常量取，保证 LaTeX 里的 ACCENT 和画面其它地方的 ACCENT 是同一个色号。
+    """
+    global _TEX_TEMPLATE_CACHE
+    if _TEX_TEMPLATE_CACHE is not None:
+        return _TEX_TEMPLATE_CACHE
+    lines = [r"\\usepackage[english]{babel}", r"\\usepackage{amsmath}",
+             r"\\usepackage{amssymb}", r"\\usepackage[dvipsnames]{xcolor}"]
+    # 色值从**本脚本的 globals** 取：HEADER 里 PRIMARY/SECONDARY/ACCENT 是 hex 字符串，
+    # 其余颜色名来自 `from manim import *`（是 ManimColor）。⚠️ 不能用 manim.ACCENT ——
+    # 那三个主题色是本项目自己定义的，manim 模块里没有（踩过一次，见 §8.49）。
+    for _name in _TEX_PALETTE:
+        _c = globals().get(_name)
+        if _c is None:
+            continue
+        try:
+            _hex = _c if isinstance(_c, str) else _c.to_hex()
+            _hex = str(_hex).lstrip("#").upper()
+        except Exception:
+            continue
+        lines.append(r"\\definecolor{%s}{HTML}{%s}" % (_name, _hex))
+    _TEX_TEMPLATE_CACHE = TexTemplate(preamble="\\n".join(lines))
+    return _TEX_TEMPLATE_CACHE
+
+
+def _ctex_template():
+    """小一号的三级分流：中文公式也要能分色。ctex 模板是个全局单例，别原地改。"""
+    global _CTEX_TEMPLATE_CACHE
+    if _CTEX_TEMPLATE_CACHE is not None:
+        return _CTEX_TEMPLATE_CACHE
+    try:
+        _base = TexTemplateLibrary.ctex
+        _CTEX_TEMPLATE_CACHE = TexTemplate(
+            preamble=_base.preamble + "\\n" + r"\\usepackage{xcolor}",
+            body=_base.body)
+    except Exception:
+        _CTEX_TEMPLATE_CACHE = TexTemplateLibrary.ctex
+    return _CTEX_TEMPLATE_CACHE
 
 
 def _rich_line(s, font_size, **kw):
@@ -512,7 +581,7 @@ def _table_cell(m, cell_w=None, cell_h=None):
 
 
 def _table(rows, cell_w=None, cell_h=None, pad_x=None, pad_y=None,
-           include_outer_lines=False):
+           include_outer_lines=False, square=False):
     """
     建表格。**只有显式给了 cell_*/pad_* 才会绕这一圈**，否则走的是和以前一模一样的一行
     `MobjectTable(...)` —— 生成代码逐字节不变（回归断言靠这条）。
@@ -530,14 +599,22 @@ def _table(rows, cell_w=None, cell_h=None, pad_x=None, pad_y=None,
         kw["h_buff"] = float(pad_x)
     if pad_y is not None:
         kw["v_buff"] = float(pad_y)
-    if cell_w is None and cell_h is None:
+    if cell_w is None and cell_h is None and not square:
         return MobjectTable(rows, include_outer_lines=include_outer_lines, **kw)
-    px = float(pad_x) if pad_x is not None else 1.3
-    py = float(pad_y) if pad_y is not None else 0.8
-    sw = max((float(cell_w) - px) if cell_w else 0.0,
-             max((c.width for r in rows for c in r), default=0.0))
-    sh = max((float(cell_h) - py) if cell_h else 0.0,
-             max((c.height for r in rows for c in r), default=0.0))
+    # 兜底值跟 `metrics.PAD_X_DEFAULT / PAD_Y_DEFAULT` 保持一致（0.7 / 0.45）——
+    # 正常路径上生成器总会显式传进来，这里只是手工调用时的兜底。
+    px = float(pad_x) if pad_x is not None else 0.7
+    py = float(pad_y) if pad_y is not None else 0.45
+    max_cw = max((c.width for r in rows for c in r), default=0.0)
+    max_ch = max((c.height for r in rows for c in r), default=0.0)
+    if square:
+        # 正方形格子：所有格子的内容框取"最长宽 / 最高"里大的那个 —— 于是每格边长一样，
+        # 长宽相等（`metrics.est_table_size` 里有同名逻辑，两边必须一致）。
+        s = max(max_cw + px, max_ch + py)
+        sw, sh = s - px, s - py
+    else:
+        sw = max((float(cell_w) - px) if cell_w else 0.0, max_cw)
+        sh = max((float(cell_h) - py) if cell_h else 0.0, max_ch)
     wrapped = [[_table_cell(c, sw, sh) for c in r] for r in rows]
     return MobjectTable(wrapped, include_outer_lines=include_outer_lines, **kw)
 
@@ -657,6 +734,10 @@ ELEMENT_SPEC = {
             "content": (T_STR, "", "LaTeX 源码"),
             "font_size": (T_INT, 40, "字号 8~96"),
             "color": (T_COLOR, "ACCENT", "颜色"),
+            "tex_colors": (T_BOOL, False,
+                           "true = 整体不上色，改由 content 里的 "
+                           "{\\color{ACCENT}\\Delta x} 给个别符号上色"
+                           "（名字用颜色表里的纯字母名，如 ACCENT/RED/TEAL）"),
         },
     },
     "axes": {
@@ -849,15 +930,31 @@ ELEMENT_SPEC = {
         },
     },
     "table": {
-        "desc": "表格（可放公式）。格子尺寸默认由内容撑出；想统一/紧凑用 cell_w/cell_h/pad_x/pad_y",
+        # ⚠️ 2026-09-17 改（用户反馈"表格太大、单元格也太大"）：原文写着
+        # "想统一/紧凑用 cell_w/cell_h/pad_x/pad_y" —— **紧凑该靠 pad，不该碰 cell_**。
+        # 模型照着这句话写出 `cell_w: 3.6`（3 列 → 整表 10.8，画面才 14.22，占了 76%），
+        # 而它本意只是想"铺得整整齐齐"。所以要在这儿把分工说死：
+        #   · 想让格子一样宽 → 用 pad（内容撑 + 统一留白）；
+        #   · cell_w/cell_h 只用于"多镜之间格子尺寸必须不变"（如滑动窗口逐镜对齐）。
+        "desc": "表格（可放公式）。**格子尺寸默认由内容撑出**，这也是大多数情况该用的写法；"
+                "想紧凑就调小 pad_x/pad_y。⚠️ `cell_w`/`cell_h` 是**写死**格子尺寸的，"
+                "只在「跨镜要保证格子大小不变」时才用 —— 拿它去把表格铺满画面会做出一个巨大的表。"
+                "⚠️ 尺寸感：画面是 14.2 × 8，**一张表建议不超过 8 宽、4 高**（约占半个画面），"
+                "3 列 × 0.5 留白的普通数字表大约 5 宽 —— 表格多半应该是画面的一部分，不是全屏",
         "params": {
             "rows": (T_TABLE, None, "二维数组，如 [[\"x\",\"0\",\"1\"],[\"y\",\"0\",\"1\"]]（每行列数必须一致）"),
             "font_size": (T_INT, 24, "字号"),
             "outer_lines": (T_BOOL, True, "是否画外框"),
-            "cell_w": (T_NUM, None, "统一格子宽（含留白）：所有格子一样宽，不再被最长的内容单独撑宽"),
-            "cell_h": (T_NUM, None, "统一格子高（含留白）"),
-            "pad_x": (T_NUM, None, "格子左右留白，默认 1.3；想紧凑可写 0.4"),
-            "pad_y": (T_NUM, None, "格子上下留白，默认 0.8"),
+            "cell_w": (T_NUM, None, "⚠️ 固定格子宽（含留白）：所有格子都是这个宽度。"
+                                    "**它是最终尺寸，不是上限** —— 写 3.6 而有三列，整张表就是 10.8 宽"
+                                    "（画面才 14.2）。只在跨镜对齐格子时才写，平时**别写**"),
+            "cell_h": (T_NUM, None, "⚠️ 固定格子高（含留白），同 cell_w：它是最终尺寸，写大了整张表就高"),
+            "pad_x": (T_NUM, None, "格子左右留白，默认 1.3（偏松：3 列光留白就吃掉 3.9 个单位）。"
+                                   "紧凑用 0.4~0.6"),
+            "pad_y": (T_NUM, None, "格子上下留白，默认 0.8（偏松）。紧凑用 0.25~0.4"),
+            "square": (T_BOOL, False, "格子取**正方形**（边长 = 内容+留白里较大的那一侧）。"
+                                      "数字网格、矩阵、卷积核这类「一格一个数」的表开着好看；"
+                                      "纯文字的表格别开 —— 那会白白多占高度"),
         },
     },
     "cell_box": {
@@ -1537,6 +1634,8 @@ def _norm_place(place, where, declared):
             }
             al = str(p.get("aligned") or "").lower()
             if al:
+                if al not in ALIGNED_EDGES:
+                    raise DSLError(f"{w}: aligned 只能是 left/right/top/bottom")
                 d["aligned"] = al
             out.append(d)
             continue
@@ -1572,10 +1671,24 @@ def _norm_place(place, where, declared):
             # 带一个"值为 null 的可选键"，第二遍再读进来形态就对不上了 —— 同 §8.6 那类问题。
             al = str(val.get("aligned") or "").lower()
             if al:
+                if al not in ALIGNED_EDGES:
+                    raise DSLError(f"{w}: aligned 只能是 left/right/top/bottom")
                 d["aligned"] = al
             out.append(d)
         elif key == "at_point":
             out.append({"at_point": _check_point(val, f"{w}.at_point", declared)})
+        elif key == "cell":
+            # 「把元素放在表格的第 r 行第 c 格上」—— 讲卷积/矩阵时把格子里的数"提出来"
+            # 就靠它：先锚在格子上，再 move_to 出去排成一行，观众才看得出哪一项对应哪一格。
+            # 位置由格子算（`_cells_center`），和 cell_box 一样不存在"自己估坐标"的错位。
+            if not isinstance(val, dict) or "of" not in val:
+                raise DSLError(f"{w}: cell 需要 {{of, row, col}}")
+            if val["of"] not in declared:
+                raise DSLError(f"{w}: 引用了未声明的元素 {val['of']!r}")
+            r, c = val.get("row"), val.get("col")
+            if not isinstance(r, int) or not isinstance(c, int):
+                raise DSLError(f"{w}.cell: row/col 必须是整数（行/列号从 1 开始）")
+            out.append({"cell": {"of": val["of"], "row": r, "col": c}})
         elif key == "shift":
             if not isinstance(val, list) or len(val) != 2:
                 raise DSLError(f"{w}: shift 必须是 [dx, dy]")
@@ -1975,7 +2088,8 @@ _FREE_VARS = {
 }
 
 
-def _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs=None):
+def _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs=None,
+                     carried=None, prev_trackers=None):
     """
     表达式里出现的标识符：不是 x、不是该元素允许的自由变量（见 _FREE_VARS）、
     不是数学函数，就必须是已声明的 tracker。
@@ -1990,6 +2104,10 @@ def _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs=None
         extra_exprs: `(where, expr[, 允许的自由变量])` 列表。给**没能通过规范化的
             元素**用 —— 那些元素进不了 norm_els，但它们表达式里的名字写错是独立的一处
             错误，顺手扫一遍能少烧一轮重试（这些表达式只做只读扫描，不参与规范化）。
+        carried / prev_trackers: **只影响报错文案**。本镜 carry 了哪些 id、
+            上一分镜里有哪些 tracker。命中时说明"这是承接过来的元素引用了上一镜的
+            tracker"—— 这种声明是从上一镜原样抄来的、看着毫无问题，光看"名字未定义"
+            根本想不到是 carry 的事（见 HANDOFF §8.46）。
     """
     found = list(extra_exprs or [])
     for el in norm_els:
@@ -2002,6 +2120,14 @@ def _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs=None
         found += [(f"timeline[{i}].point", e, ()) for e in _scan_point_exprs(ac)]
 
     errs = []
+    _carried = carried or set()
+    _prev_tr = prev_trackers or set()
+    # carry 诊断的**去重**：(元素, tracker) 只报一次。
+    #
+    # 为什么必须去重：一个点的 x / y 是两条独立表达式，会各扫出一处"名字未定义"——
+    # 旧的通用文案里两条内容不同（分别带上自己的表达式），还算有用；而 carry 这条
+    # 是整段重写的说明，两条会**一字不差地重复**，白占回灌预算（_MAX_ERROR_CHARS=1800）。
+    _hinted = set()
     for item in found:
         # 兼容老的两元组形态：调用方少写一个字段时不该整个炸掉
         where, expr = item[0], item[1]
@@ -2010,6 +2136,30 @@ def _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs=None
             if (name != "x" and name not in free
                     and name not in SAFE_NAMES and name not in trackers):
                 allowed = "、".join(("x",) + tuple(free))
+                # 「承接过来的元素引用了上一镜的 tracker」要单独说清。它是**唯一**一种
+                # "表达式看着完全正常却过不了校验"的形态：声明是从上一镜原样搬来的，
+                # 名字也没写错，只是那个 tracker 不在本镜里 —— 光报"未定义"会把人带偏
+                # （写 few-shot 示例时我们自己就照着规格踩了一次）。
+                # ⚠️ 两条出路都要给，而且顺序有讲究：**推荐固定值重声明**，因为
+                # `carry` 一个 tracker 在拆分渲染下会回到声明时的初始值（画面跳回去）。
+                eid = str(where).split(".", 1)[0]
+                if eid in _carried and name in _prev_tr:
+                    if (eid, name) in _hinted:
+                        continue
+                    _hinted.add((eid, name))
+                    stub = '{"id": "%s", "carry": true}' % name
+                    errs.append(
+                        f"{where_root}.{where}: {eid} 是**承接**过来的元素，它引用的是"
+                        f"上一分镜里的 tracker {name!r}，而本镜既没承接 {name!r}、"
+                        f"也没重新声明它。两条出路："
+                        f"① **更稳**：**不要 carry 这个元素**，改用固定值在本镜重新"
+                        f"声明一遍（把 {name!r} 换成上一镜结束时的那个数）—— "
+                        f"位置对得上、也不会跳；"
+                        f"② 把 {name!r} 也一起承接（在 elements 里加 {stub}）——"
+                        f"语法也合法，但拆分渲染下承接来的 tracker 会回到**声明时的"
+                        f"初始值**，画面会跳回去。"
+                    )
+                    continue
                 errs.append(
                     f"{where_root}.{where}: 表达式 {expr!r} 里的 {name!r} 未定义"
                     f"（只能是 {allowed}、数学函数，或某个 tracker 的 id）"
@@ -2379,7 +2529,8 @@ def _layout_errors_for(el, where):
     if kind == "table":
         fs = el["font_size"]
         info = metrics.est_table_size(el["rows"], fs, el.get("cell_w"), el.get("cell_h"),
-                                      el.get("pad_x"), el.get("pad_y"))
+                                      el.get("pad_x"), el.get("pad_y"),
+                                      square=bool(el.get("square")))
         # ① 给了 cell_w/cell_h 就必须真的装得下：装不下的话格子会被内容撑大，
         #    "所有格子等宽"这个承诺就悄悄失效了（改了不生效 = 最忌讳的失效）。
         if el.get("cell_w") is not None and info["need_cell_w"] > el["cell_w"] + 1e-9:
@@ -2571,8 +2722,13 @@ def validate_scene(scene, idx, prev=None):
         except DSLError as e:
             errors.append(str(e))
 
-    # 表达式标识符扫描是只读的、与上面互不影响，所以总是跟别的错误一起报
-    errors += _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs)
+    # 表达式标识符扫描是只读的、与上面互不影响，所以总是跟别的错误一起报。
+    # 额外带上 carried + 上一镜的 tracker 名单，好把「承接来的元素引用了上一镜的
+    # tracker」这条报清楚（见 _scan_expr_names 的 Args）。
+    prev_trackers = {i for i, e in ((prev or {}).get("elements") or {}).items()
+                     if e.get("kind") == "tracker"}
+    errors += _scan_expr_names(where_root, norm_els, norm_acts, trackers, extra_exprs,
+                               carried=carried, prev_trackers=prev_trackers)
 
     # 这两道都看"规范化后的整体"。上游已经有错时跳过 —— 那种情况下它们给出的
     # 只会是级联噪音，例如"of 指向的 table 本身没过校验"。
@@ -2838,10 +2994,16 @@ class _Builder:
                 d = DIRECTIONS.get(p["direction"], "DOWN")
                 s = f".next_to({self._var(p['next_to'])}, {d}, buff={_num(p['buff'])}"
                 if p.get("aligned"):
-                    s += f", aligned_edge={p['aligned'].upper()}"
+                    # 走 ALIGNED_EDGES 翻译：top→UP、bottom→DOWN（直接 upper() 会
+                    # 生成 BOTTOM 这种不存在的名字，见常量表那里的说明）
+                    s += f", aligned_edge={ALIGNED_EDGES.get(p['aligned'], 'ORIGIN')}"
                 out.append(s + ")")
             elif "at_point" in p:
                 out.append(f".move_to({self._point_code(p['at_point'])})")
+            elif "cell" in p:
+                c = p["cell"]
+                out.append(f".move_to(_cells_center({self._var(c['of'])}, "
+                           f"[{int(c['row'])}], [{int(c['col'])}]))")
             elif "shift" in p:
                 out.append(f".shift(np.array([{_num(p['shift'][0])}, {_num(p['shift'][1])}, 0]))")
             elif "scale" in p:
@@ -2900,6 +3062,11 @@ class _Builder:
                 f'font_size={el["font_size"]}, color={_color(el["color"])})')
 
     def _mk_formula(self, el):
+        if el.get("tex_colors"):
+            # 颜色交给 content 里的 \color{...}：**不能**给 MathTex 传 color，
+            # 传了 manim 的 set_color 会把 LaTeX 指定的颜色整个盖掉（见 §8.49）。
+            return (f'formula(r"""{_esc(el["content"])}""", '
+                    f'font_size={el["font_size"]})')
         return (f'formula(r"""{_esc(el["content"])}""", '
                 f'font_size={el["font_size"]}, color={_color(el["color"])})')
 
@@ -3092,8 +3259,8 @@ class _Builder:
         outer = "True" if el["outer_lines"] else "False"
         # 不给新参数时**生成的代码逐字节不变**（回归断言靠这条）：连 h_buff/v_buff
         # 都不显式传 —— 显式传"和默认值一样"的数也会改字节。
-        keys = ("cell_w", "cell_h", "pad_x", "pad_y")
-        if all(el.get(k) is None for k in keys):
+        keys = ("cell_w", "cell_h", "pad_x", "pad_y", "square")
+        if all(not el.get(k) for k in keys):
             return f'MobjectTable([{rows}], include_outer_lines={outer})'
         # ⚠️ 留白必须在这里算好再显式传下去：`effective_pads()` 是"给了 cell_w 就用紧凑
         # 留白"这条规则的**唯一实现**，校验层（metrics.est_table_size）用的是同一个函数。
@@ -3103,6 +3270,8 @@ class _Builder:
                                         el.get("pad_x"), el.get("pad_y"))
         opts = [f"{k}={_num(el[k])}" for k in ("cell_w", "cell_h") if el.get(k) is not None]
         opts += [f"pad_x={_num(px)}", f"pad_y={_num(py)}"]
+        if el.get("square"):
+            opts.append("square=True")
         opts.append(f"include_outer_lines={outer}")
         return f'_table([{rows}], ' + ", ".join(opts) + ")"
 
@@ -3185,7 +3354,7 @@ class _Builder:
     def _mk_group(self, el):
         items = ", ".join(self._var(i) for i in el["items"] if isinstance(i, str))
         d = DIRECTIONS.get(str(el["direction"]).lower(), "DOWN")
-        al = str(el.get("aligned", "left")).upper()
+        al = ALIGNED_EDGES.get(str(el.get("aligned", "left")).lower(), "LEFT")
         return (f'VGroup({items}).arrange({d}, aligned_edge={al}, '
                 f'buff={_num(el["buff"])})')
 
@@ -3216,29 +3385,44 @@ class _Builder:
     # show / remove / trace 不是 .animate 类动画，manim 不接受，只能降级
     _PARALLEL_INSTANT_ACTS = frozenset({"show", "remove", "trace"})
 
+    _tmp_n = 0          # 「旋转 + 平移」合成刚体运动时的临时变量计数
+
     def _parallel(self, ac):
         subs = ac.get("actions") or []
-        # target 多于一个的动作（如 show/remove/trace）会展开成多条语句，塞不进一条
-        # self.play —— 由校验层的展平保证这里不会遇到，真遇到就整段降级（见下）。
-        # 同一个元素被两个子动作碰（含两次 shift）：整段顺序播放。硬塞进同一条 play
-        # 里谁先生效取决于 manim 内部顺序，合并成链式调用又会让估时和渲染色都变复杂 ——
-        # 而"对同一元素的两个操作有先后"本来就是更符合直觉的语义。
-        tgts = [t for s in subs for t in (s.get("target") or [])]
-        if (all(s.get("do") in self._PARALLEL_ANIM_ACTS and len(s.get("target") or []) == 1
-                for s in subs)
-                and len(tgts) == len(set(tgts))):
-            exprs = []
-            for sub in subs:
-                # 用 _anim_timed：把各子动作自己的 run_time 注入到**它的表达式内部**
-                # （为什么不拼在外面 / 不写在外层，见 _anim_timed 的 docstring）
-                exprs.append(self._anim_timed(sub["do"], self._var(sub["target"][0]), sub))
-            self.lines.append(f"        # >> 真并行：{len(exprs)} 条子动作合成一条 self.play")
-            self.lines.append("        self.play(" + ", ".join(exprs) + ")")
-            return
+        # 先按 target 归并（保持出现顺序）：同一元素上的子动作交给 _parallel_group 归约 ——
+        # 其中「旋转 + 平移」会合成**一次刚体运动**（见 _rigid_rotate）。
+        # target 多于一个的动作（如 show/remove/trace）会展开成多条语句，塞不进一条 self.play，
+        # 由校验层的展平保证这里不会遇到，真遇到就整段降级（见下）。
+        groups = []
+        for sub in subs:
+            ts = sub.get("target") or []
+            if sub.get("do") in self._PARALLEL_INSTANT_ACTS or len(ts) != 1:
+                groups.append((None, [sub]))
+                continue
+            for g in groups:
+                if g[0] == ts[0]:
+                    g[1].append(sub)
+                    break
+            else:
+                groups.append((ts[0], [sub]))
+
+        exprs, prelude = [], []
+        for t, lst in groups:
+            one = self._parallel_group(t, lst, prelude)
+            if one is None:
+                break
+            exprs.append(one)
+        else:
+            if exprs:
+                # 支点那几行必须在动画**之前**算（它们读的是元素当前的中心）
+                self.lines.extend("        " + p for p in prelude)
+                self.lines.append(f"        # >> 真并行：{len(exprs)} 条子动作合成一条 self.play")
+                self.lines.append("        self.play(" + ", ".join(exprs) + ")")
+                return
 
         # ---- 降级：顺序播放，但**如实**写出"这段是顺序的" ----
-        # 能走到这里说明子动作里有 show/remove/trace，或有多个 target，
-        # 或同一个元素被两个子动作碰（见上面的判据）。
+        # 能走到这里说明子动作里有 show/remove/trace、有多个 target，或同一个元素被
+        # 三个以上子动作碰（"先放大再旋转"这类本来就有先后，顺序语义才是对的）。
         # 宁可顺序播（画面还是对的）也不能生成 manim 会报错的代码。
         self.lines.append("        # >> 降级为顺序播放：含无法并行的子动作")
         for i, sub in enumerate(subs):
@@ -3250,6 +3434,56 @@ class _Builder:
                 continue
             self.lines.append(f"        # >> 顺序子动作 > {sub.get('do', '?')}")
             self.act(sub)
+
+    def _parallel_group(self, target, subs, prelude):
+        """把一个元素上的若干子动作归约成**一条** manim 动画表达式；做不到返回 None。"""
+        if target is None or not subs:
+            return None
+        if len(subs) == 1:
+            if subs[0].get("do") not in self._PARALLEL_ANIM_ACTS:
+                return None
+            # 用 _anim_timed：把子动作自己的 run_time 注入到**它的表达式内部**
+            # （为什么不拼在外面 / 不写在外层，见 _anim_timed 的 docstring）
+            return self._anim_timed(subs[0]["do"], self._var(target), subs[0])
+        # 恰好两条、且是「旋转 + 平移」→ 合成一次刚体运动
+        dos = sorted(s.get("do") for s in subs)
+        if len(subs) == 2 and dos in (["move_to", "rotate"], ["rotate", "shift"]):
+            rot = next(s for s in subs if s["do"] == "rotate")
+            mv = next(s for s in subs if s["do"] != "rotate")
+            return self._rigid_rotate(target, rot, mv, prelude)
+        return None
+
+    def _rigid_rotate(self, target, rot, mv, prelude):
+        """
+        「旋转 θ + 平移到目标」合成**一次** manim 的 `Rotate` —— 绕一个算出来的支点转。
+
+        为什么必须合成一条：manim 里同一个 mobject 的两条动画各自取初态、会互相打架；
+        而 `.animate` 链（`x.animate.rotate(θ).move_to(p)`）是**逐点线性插值**，
+        转 180° 时图形会从中间塌过去 —— 用户 2026-09-17 反馈的「旋转时发生形变」正是这个。
+
+        支点：绕 P 转 θ 会把 C0 送到 C1，当
+            P = C0 + d/2 + (cot(θ/2)/2)·J(d)，  d = C1 − C0，J 是逆时针 90°
+        时成立（θ = 180° 时 cot 项为 0，P 就是中点；θ → 0 退化成纯平移）。
+        于是「转 θ」和「把中心挪到 C1」一次完成，而且全程是刚体 —— 不形变。
+        """
+        var = self._var(target)
+        rad = round(float(rot["angle"]) * 3.141592653589793 / 180.0, 6)
+        if rad == 0:                       # 没转，就是纯平移
+            return self._anim_timed(mv["do"], var, mv)
+        rt = max(x.get("run_time") or 0.0 for x in (rot, mv)) or None
+        self._tmp_n += 1
+        n = self._tmp_n
+        prelude.append(f"_c0_{n} = {var}.get_center()")
+        if mv["do"] == "move_to":
+            prelude.append(f"_d_{n} = {self._point_code(mv['point'])} - _c0_{n}")
+        else:                              # shift：位移就是向量
+            prelude.append(f"_d_{n} = np.array([{_num(mv['vector'][0])}, "
+                           f"{_num(mv['vector'][1])}, 0])")
+        prelude.append(
+            f"_piv_{n} = _c0_{n} + _d_{n} / 2 + "
+            f"np.array([-_d_{n}[1], _d_{n}[0], 0]) * (0.5 / np.tan({rad} / 2))")
+        rt_s = f", run_time={_num(rt)}" if rt else ""
+        return f"Rotate({var}, {rad}, about_point=_piv_{n}{rt_s})"
 
     def act(self, ac):
         do = ac["do"]
@@ -3355,6 +3589,15 @@ class _Builder:
             # 否则后续引用 `a` 的动作会打到一个已经被移出场景的旧对象上，
             # 而 manim 会"把被动画却不在场景里的对象重新加回场景"，把旧内容叠回来。
             self.alias[a] = self.alias.get(b, b)
+            # ⚠️ 2026-09-17 补：换绑只管**本镜编译器**（`self.alias` 是 `_Builder` 的），
+            # 而分镜边界的清屏/末尾淡出片段是**渲染器**拼的 —— 它按 id 直接拼变量名
+            # （`_clear_except` / `_tail_fade` → `dsl.var_name(id)`），不知道 `a` 已经换人了。
+            # 于是把**屏幕上真正的那个新对象**当成"上一镜的残留"淡掉：
+            # 实测（卷积示例）镜 2 末尾 `replace tb_out into tb_out1` 之后，镜 3 一开头的
+            # `_keep` 里留的还是早已离场的 `_e_tb_out`，装好 37 的输出表整块消失，
+            # 直到镜 3 末尾自己再 replace 一次才又出现 —— 看起来就像"输出没 carry"。
+            # 把原名也指到新对象上，两边就一致了（`_keep` 里的名字仍然是它，但指的是现在的它）。
+            self.lines.append(f"        {_V}{a} = {vb}")
             return
         if do == "move_along":
             a = ac["target"][0]
@@ -3436,8 +3679,12 @@ class _Builder:
         if do == "scale":
             return f"{var}.animate.scale({_num(ac['factor'])})"
         if do == "rotate":
+            # ⚠️ 2026-09-17 修：原来生成 `x.animate.rotate(θ)` —— `.animate` 是**逐点线性
+            # 插值**，转 180° 时三角形的三个顶点各自走弦、中途会塌成一条线（用户反馈的
+            # 「旋转的时候进行了形变」）。manim 的 `Rotate` 才是刚体旋转
+            # （`about_point=None` 时绕自身中心转，实测源码确认）。
             rad = round(float(ac["angle"]) * 3.141592653589793 / 180.0, 6)
-            return f"{var}.animate.rotate({rad})"
+            return f"Rotate({var}, {rad})"
         if do == "set_color":
             return f"{var}.animate.set_color({_color(ac['color'])})"
         if do == "set_opacity":
@@ -3576,7 +3823,11 @@ def describe(include_place=True) -> str:
     out.append("```")
     out.append("elements = 画面上有哪些东西；timeline = 它们按什么顺序出场/变化。")
     out.append("")
-    out.append("`duration` 是这一镜的**目标秒数**（4~12），它是「软」的：")
+    # ⚠️ 2026-09-17 改：原文是"目标秒数（4~12）" —— §8.31 把那条硬约束改成"建议"时
+    # 只改了 llm.py 的手写规范，规格里这句没跟着改。它比校验层（0.5~120）严得多，
+    # 且与"连贯过程用一个长分镜一口气演完"直接冲突 —— 模型会把长过程硬切在 12 秒处。
+    # 秒数按内容定，这里只留真实上限。
+    out.append("`duration` 是这一镜的**目标秒数**（按内容定，上限 120 秒），它是「软」的：")
     out.append("- 算式 = timeline 里每个动作的耗时相加（parallel 段按其中**最长**的那个算）"
                "，省略 run_time 时就用下面动作表里给的默认值；")
     out.append("- 这个和**小于** duration → 自动补一段停顿，节奏不会赶；")
@@ -3601,8 +3852,20 @@ def describe(include_place=True) -> str:
     out.append("2. 上一分镜结束时它必须**真的在屏上**：被 create / write / fade_in / grow / "
                "draw_border / show 上过屏，且之后没被 fade_out / remove / clear_all 清掉。"
                "（声明了却从没被动作点过的元素不算在屏上。)")
-    out.append("3. 它依赖的元素也要一起 carry（plot 的 `axes`、`cell_box` 的 `of`、"
-               "`group` 的 `items`）—— 否则依赖会被分镜边界清掉，画面只剩一个飘着的东西。")
+    out.append("3. 它依赖的东西也要一起 carry：`plot` 的 `axes`、`cell_box` 的 `of`、"
+               "`group` 的 `items`，**以及它表达式里引用的 tracker**"
+               "（点写成 `\"y\": \"s**2\"`，那 `s` 也得一起承接）——"
+               "否则依赖会被分镜边界清掉，画面只剩一个飘着的东西。")
+    # ⚠️ 2026-09-17 加：这条原来只列了三种**元素**依赖，漏了 tracker。照着规格写也会撞：
+    # 承接一个引用 tracker 的元素、却没承接那个 tracker → 表达式校验报「xx 未定义」，
+    # 报错完全看不出是 carry 的事（写 few-shot 示例时踩了一次）。
+    # 但**不能只补一句"把 tracker 也 carry"**：拆分渲染下每个分镜是独立 Scene，
+    # 承接来的 tracker 会回到**声明时的初始值**（不是上一镜结束时的值）——
+    # 上一镜扫到 3、这一镜却是 1，点会当场跳回去。所以两条路都得写清楚。
+    out.append("⚠️ 但**承接一个 tracker 要格外小心**：拆分渲染下每个分镜是独立的 Scene，"
+               "承接来的 tracker 会回到**声明时的初始值**——上一镜扫到 3、这一镜却是 1，"
+               "点会当场跳回去。这种情况**别 carry**，改用**固定值**在本镜重新声明一遍"
+               "（写 `\"x\": 3`，取上一镜结束时的那个数），画面才接得上。")
     out.append("")
 
     out.append("## 元素类型（kind）")
@@ -3621,6 +3884,7 @@ def describe(include_place=True) -> str:
     out.append("```")
     out.append("可用键：`edge`(up/down/left/right) `corner`(UL/UR/DL/DR) "
                "`next_to`({of,direction,buff,aligned}) `at_point` "
+               "`cell`({of,row,col}：贴在表格的某一格上，把格子里的数「提出来」时用它) "
                "`shift`([dx,dy]) `scale` `rotate`(度) `center` `fit_width` `z`")
     # ⚠️ 实测（2026-09-12）：不写这句话，模型会写出 `"place":[{"center"}]` —— 看着像
     # JSON、其实少了个 `: true`，直接解析失败。`{ "center" }` 是 JS 简写语法，
@@ -3650,9 +3914,17 @@ def describe(include_place=True) -> str:
                "不写 `effect` 就是 `crossfade`（旧的淡出、新的淡入），另有 "
                "`slide`（上滑交叉）/ `write`（逐字写出）/ `morph`（形变，适合图形变形）：")
     out.append("```")
-    out.append('{"do":"replace","target":"info","into":{"id":"i2","kind":"text",'
-               '"content":"下一句提示"},"effect":"slide","run_time":1.2}')
+    out.append('{"id":"cap","kind":"text","content":"先看它在 x=1 处的情形",'
+               '"place":[{"edge":"down","buff":0.5}]}')
+    out.append('{"do":"replace","target":"cap","into":{"id":"cap2","kind":"text",'
+               '"content":"斜率算出来是 2，所以切线是 y = 2x - 1",'
+               '"place":[{"edge":"down","buff":0.5}]},"effect":"slide","run_time":1.2}')
     out.append("```")
+    # ⚠️ 2026-09-17 改：原示例的 `into` 没写 place，教出来的是"换一条字幕就跳回画面正中"
+    # —— replace 用的是**新元素自己**的位置，不继承旧字幕的 place（见 _place_calls）。
+    # 字幕类内容位置必须稳定，所以示例里把 place 写全，并把这条规则点破。
+    out.append("⚠️ `into` 里的新元素**要写和原来一样的 `place`**，"
+               "否则新文字会跑到画面正中：replace 用的是新元素自己的位置，不会继承旧的。")
     out.append(metrics.budget_line())
     out.append("")
 
@@ -3669,12 +3941,16 @@ def describe(include_place=True) -> str:
     # 刻意不写引擎那侧的词汇（always_redraw / add 之类）：红线 1 明确要求模型
     # "别把 Manim 的名字搬过来"，规格自己就不该先把它们摆出来。
     out.append("含 tracker 引用（或 live）的元素是**每帧重算**的对象：")
-    out.append("**它们不会自动上屏，必须用 `{\"do\":\"show\",\"target\":\"...\"}` 显式显示。**")
-    # 2026-09-16 补的正面表态：规格里原先只讲"动态元素怎么用才不出错"，成本那点事
-    # 只在 llm.py 的取舍常识里以"警告"的形式出现，模型读到的净效果是"动态是个坑"。
-    # 而它恰恰是这套 DSL 最主要的表现力来源 —— 这里必须把话说正。
-    out.append("每帧重算只是**慢一点**，不值得为它放弃动态 —— 「变化 / 联动 / 累积」这类内容"
-               "就该让关键的量真的动起来，画面比出片快重要。")
+    # ⚠️ 2026-09-17 改：原来写"必须用 `show` 显式显示"，等于把 **show（瞬间出现）**当成了
+    # 唯一出路。实测动态元素用 `fade_in` 上屏完全有效 —— 会真的淡入（半途帧是半透明的），
+    # 而且淡入后 updater 照常工作（点继续跟着 tracker 走）。见 HANDOFF §8.47。
+    # 而"只能瞬间出现"正是"画面里东西啪地冒出来"这种生硬过渡的来源。
+    out.append("**它们不会自动上屏，必须显式上屏**：`show` 是瞬间出现、`fade_in` 是淡入 —— "
+               "**要过渡自然就用 `fade_in`**（淡入之后它照旧每帧重算）。")
+    # 2026-09-17 改：这里原先是「鼓励动态」的正面表态（"不该放弃动态""就该动起来"），
+    # 与 llm.py 取舍常识里那条同步收紧为中性 —— 动态不是加分项，按画面需不需要来定。
+    out.append("每帧重算只是**慢一点**，它既不比静态好、也不比静态差："
+               "用不用只看画面需不需要。")
     out.append("")
     out.append("## 网格与滑动窗口（卷积 / 池化 / 棋盘格 / 矩阵）")
     out.append("讲这类内容：格子用 `table`（数字天然落在格子里，不要用 text 拼多行数字），")

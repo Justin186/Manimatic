@@ -89,10 +89,13 @@ async def chat(req: ChatRequest):
 
     def run(push):
         try:
+            # ⚠️ 不传 temperature：它和 json_mode 一样，唯一归属是 resolve_config()
+            # （llm.local.json 的档案 → 默认 0.2）。路由层写死 0.2 会让设置页/配置文件里
+            # 改的温度**静默失效**，而启动横幅打印的又是配置文件里的值 —— 报的和跑的不是
+            # 一个数，与 §8.2 那个 json_mode 的坑同形。
             cfg = llm.resolve_config(provider=config.LLM_PROVIDER or None,
                                      model=config.LLM_MODEL or None,
                                      base_url=config.LLM_BASE_URL or None,
-                                     temperature=0.2,
                                      profile=config.LLM_PROFILE or None)
         except llm.LLMError as e:
             # 配置类错误（没 key / 未知厂商）要在**发起请求前**报出来，

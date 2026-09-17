@@ -1,0 +1,193 @@
+{
+  "_note": "few-shot 示例 2（几何题／割补法）的**源文件**。上线方式与示例 1 相同：进 system prompt 时由 _example_from_file() 读入，下划线开头的键会被剥掉。放这里是为了能直接验：python generate.py examples/fewshot_geometry.json --name fewshot_geometry（渲染），或 python -m pytest tests/test_normalize_idempotent.py（校验 + 幂等）。",
+  "_structure": "四镜的节拍：① 引入（摆出这个斜三角形 + 点出难点：三条边都是斜的，既数不出格子、也读不出底和高）→ ② 补（套一个 4×4 的方框，方框面积 16 好算）→ ③ 割（三个角上是三块直角三角形，各自的面积 2／3／4，左上角同步列出每一块的算式）→ ④ 算与收口（2+3+4=9、16−9=7，点出割补法的通用思路）。⚠️ 全程没有 axes —— 几何题只画图形本身，这是本示例对「不要默认上坐标系」的示范。⚠️ 坐标是刻意选的：三角形 (0,0)、(4,1)、(2,4)，外框正好是 4×4 的正方形，三块缺口是 4×1÷2=2、3×2÷2=3、2×4÷2=4（共 9），三角形 16−9=7 —— **全是整数，而且和图上长度严格一致**。旧版示例 2 的硬伤恰恰在这：图画的是 3.6×2.4，字幕却写「底 3、高 2」，算式写「4×3÷2=6」—— 三处互不相干。few-shot 是要被照抄的，数字必须自洽。",
+
+  "brief": "斜着的三角形不能直接套「底 × 高 ÷ 2」，因为三条边都是斜的，底和高都读不出来。办法是「割补」：先用一个方框把它框住 —— 方框是 4×4，面积 16；再把多出来的三块直角三角形减掉，它们分别是 4×1÷2=2、3×2÷2=3、2×4÷2=4，一共 9。剩下的就是这块三角形：16 − 9 = 7。",
+  "intent": "propose",
+  "outline": [
+    { "id": 1, "title": "这块三角形难在哪", "durationSec": 5.4, "summary": "画出斜着的三角形，点出难点：三条边都是斜的 —— 格子数不出、底和高也读不出，公式套不上" },
+    { "id": 2, "title": "先补一个方框", "durationSec": 5.8, "summary": "给它套上 4×4 的方框，标出边长，方框面积 16 好算" },
+    { "id": 3, "title": "再把多出来的割掉", "durationSec": 9.0, "summary": "三个角上是三块直角三角形，面积分别是 2、3、4，左上角同步列出每一块的算式" },
+    { "id": 4, "title": "减一减就是它", "durationSec": 7.6, "summary": "2+3+4=9、16−9=7，收口到割补法的思路：补成好算的图形，再减掉多出来的" }
+  ],
+  "title": "割补法求三角形面积",
+  "problem_type": "geometry",
+
+  "scenes": [
+    {
+      "id": 1,
+      "duration": 5.4,
+      "_note": "引入镜，**不是标题卡**：先把题目和图形一起摆出来，最后一句点出「为什么不能直接算」—— 三条边都是斜的，既没法数格子、也读不出底和高。这一镜一个公式都不写，它的任务是把问题说清楚。**全程不上坐标系**：几何题只画图形本身（对照「反模板」第 1 条）。duration = 1.4 + 1.2 + 1.2 + 1.0 + 0.6 = 5.4。",
+      "elements": [
+        { "id": "tri", "kind": "polygon", "points": [[-2,-2],[2,-1],[0,2]],
+          "color": "PRIMARY", "stroke_width": 4, "fill_opacity": 0.18 },
+        { "id": "cap", "kind": "text",
+          "content": "求这个三角形的面积",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "create", "target": "tri", "run_time": 1.4 },
+        { "do": "write", "target": "cap", "run_time": 1.2 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "三条边都是斜的 —— 格子数不出来，底和高也读不出来",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "indicate", "target": "tri", "run_time": 1.0 },
+        { "do": "wait", "time": 0.6 }
+      ]
+    },
+
+    {
+      "id": 2,
+      "duration": 5.8,
+      "_note": "补形镜：**先字幕、后动作**——开口先说「先给它套一个方框」（wtite 这行字幕），**再** create 方框，然后用 replace 把结论（4×4）说出来，最后才写 16 这个数。观众在方框出现之前就知道要干什么（用户要求：字幕和运动要重叠，不是演完再说）。方框是 GREY 虚线感的弱色、不加填充 —— 它是辅助线，不是主角；三角形仍是 PRIMARY。边长标注 4 / 4 是**图上长度的真实读数**（不是贴上去的说明）。duration = 1.0 + 1.2 + 0.8 + 1.2 + 1.0 + 0.6 = 5.8。",
+      "elements": [
+        { "id": "tri", "carry": true },
+        { "id": "box", "kind": "polygon", "points": [[-2,-2],[2,-2],[2,2],[-2,2]],
+          "color": "GREY", "stroke_width": 3 },
+        { "id": "w_bot", "kind": "text", "content": "4", "font_size": 26,
+          "place": [{ "at_point": [0,-2.35] }] },
+        { "id": "w_left", "kind": "text", "content": "4", "font_size": 26,
+          "place": [{ "at_point": [-2.4,0] }] },
+        { "id": "eq1", "kind": "formula", "content": "4 \\times 4 = 16",
+          "font_size": 30, "color": "ACCENT",
+          "place": [{ "corner": "ur", "buff": 0.5 }] },
+        { "id": "cap", "kind": "text",
+          "content": "先给它套一个方框",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "create", "target": "box", "run_time": 1.2 },
+        { "do": "fade_in", "target": ["w_bot", "w_left"], "run_time": 0.8 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "方框是 4 × 4 —— 它的面积好算",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "write", "target": "eq1", "run_time": 1.0 },
+        { "do": "wait", "time": 0.6 }
+      ]
+    },
+
+    {
+      "id": 3,
+      "duration": 9.0,
+      "_note": "割形镜：三块缺口一块一块淡入，**每块都先给数（图上直接读出来的边长）、再给算式**——左上角那三条 GREY 算式就是每一步的旁注（用户要求：推导类画面每一步都要有「这一步在干什么」），它比公式便宜（0.8 秒），所以紧跟着图形出现。三块都用 ORANGE：它们是「要减掉的部分」，和蓝色的三角形、灰色的辅助线都分得开。三块里的面积数字用 WHITE 压在橙色填充上（黄字在橙底上对比不够）。⚠️ 面积数字 2／3／4 与左上角算式里的结果**必须一致**，边长标注 1／3／2／2 也必须和图形对得上 —— 这是本例最要紧的自洽点。duration = 1.0 + 0.6 + 0.8 + 0.6 + 0.8 + 0.8 + 0.6 + 0.6 + 0.8 + 0.6 + 1.2 + 0.6 = 9.0。",
+      "elements": [
+        { "id": "tri", "carry": true },
+        { "id": "box", "carry": true },
+        { "id": "eq1", "carry": true },
+        { "id": "w_bot", "carry": true },
+        { "id": "w_left", "carry": true },
+
+        { "id": "t1", "kind": "polygon", "points": [[-2,-2],[2,-2],[2,-1]],
+          "color": "ORANGE", "stroke_width": 2.5, "fill_opacity": 0.3 },
+        { "id": "t2", "kind": "polygon", "points": [[2,-1],[2,2],[0,2]],
+          "color": "ORANGE", "stroke_width": 2.5, "fill_opacity": 0.3 },
+        { "id": "t3", "kind": "polygon", "points": [[0,2],[-2,2],[-2,-2]],
+          "color": "ORANGE", "stroke_width": 2.5, "fill_opacity": 0.3 },
+
+        { "id": "m1", "kind": "text", "content": "1", "font_size": 24,
+          "place": [{ "at_point": [2.3,-1.5] }] },
+        { "id": "m2", "kind": "text", "content": "3", "font_size": 24,
+          "place": [{ "at_point": [2.35,0.5] }] },
+        { "id": "m3", "kind": "text", "content": "2", "font_size": 24,
+          "place": [{ "at_point": [1,2.32] }] },
+        { "id": "m4", "kind": "text", "content": "2", "font_size": 24,
+          "place": [{ "at_point": [-1,2.32] }] },
+
+        { "id": "n1", "kind": "text", "content": "$2$", "font_size": 28,
+          "color": "WHITE", "place": [{ "at_point": [0.7,-1.67] }] },
+        { "id": "n2", "kind": "text", "content": "$3$", "font_size": 28,
+          "color": "WHITE", "place": [{ "at_point": [1.35,1.0] }] },
+        { "id": "n3", "kind": "text", "content": "$4$", "font_size": 28,
+          "color": "WHITE", "place": [{ "at_point": [-1.35,0.65] }] },
+
+        { "id": "a1", "kind": "formula", "content": "4 \\times 1 \\div 2 = 2",
+          "font_size": 24, "color": "GREY",
+          "place": [{ "corner": "ul", "buff": 0.5 }] },
+        { "id": "a2", "kind": "formula", "content": "3 \\times 2 \\div 2 = 3",
+          "font_size": 24, "color": "GREY",
+          "place": [{ "next_to": { "of": "a1", "direction": "down", "buff": 0.3,
+                                    "aligned": "left" } }] },
+        { "id": "a3", "kind": "formula", "content": "2 \\times 4 \\div 2 = 4",
+          "font_size": 24, "color": "GREY",
+          "place": [{ "next_to": { "of": "a2", "direction": "down", "buff": 0.3,
+                                    "aligned": "left" } }] },
+
+        { "id": "cap", "kind": "text",
+          "content": "多出来的三块都是直角三角形",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "fade_in", "target": ["t1", "m1"], "run_time": 0.6 },
+        { "do": "write", "target": "a1", "run_time": 0.8 },
+        { "do": "write", "target": "n1", "run_time": 0.6 },
+        { "do": "fade_in", "target": ["t2", "m2", "m3"], "run_time": 0.8 },
+        { "do": "write", "target": "a2", "run_time": 0.8 },
+        { "do": "write", "target": "n2", "run_time": 0.6 },
+        { "do": "fade_in", "target": ["t3", "m4"], "run_time": 0.6 },
+        { "do": "write", "target": "a3", "run_time": 0.8 },
+        { "do": "write", "target": "n3", "run_time": 0.6 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "三块分别是 2、3、4 —— 把多出来的都减掉",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "wait", "time": 0.6 }
+      ]
+    },
+
+    {
+      "id": 4,
+      "duration": 7.6,
+      "_note": "算与收口镜：三块剪影和面积数字**全部 carry 过来**（t1/t2/t3/n1/n2/n3），方框、三角形、16 也留着 —— 减法要在画面上有对应物，清屏重来就断线了。两行算式左对齐串起来（next_to(down, aligned=left)），每行右侧一句 GREY 旁注说这一步在干什么（同示例 1 镜 4 的写法）。⚠️ 这一镜**不再出现新图形**：它是代数那一步；割补法的「几何直觉」在镜 2／3 已经走完了，这里把两条路对上（图上少掉的三块 ↔ 算式里减掉的 9）。duration = 1.0 + 1.0 + 0.8 + 1.0 + 0.8 + 1.2 + 1.0 + 0.8 = 7.6。",
+      "elements": [
+        { "id": "tri", "carry": true },
+        { "id": "box", "carry": true },
+        { "id": "eq1", "carry": true },
+        { "id": "t1", "carry": true },
+        { "id": "t2", "carry": true },
+        { "id": "t3", "carry": true },
+        { "id": "n1", "carry": true },
+        { "id": "n2", "carry": true },
+        { "id": "n3", "carry": true },
+
+        { "id": "s1", "kind": "formula", "content": "2 + 3 + 4 = 9",
+          "font_size": 28, "color": "WHITE",
+          "place": [{ "corner": "ul", "buff": 0.5 }] },
+        { "id": "a1", "kind": "text", "content": "$\\leftarrow$ 多出来的一共 9",
+          "font_size": 24, "color": "GREY",
+          "place": [{ "next_to": { "of": "s1", "direction": "right", "buff": 0.3 } }] },
+        { "id": "s2", "kind": "formula", "content": "16 - 9 = 7",
+          "font_size": 28, "color": "ACCENT",
+          "place": [{ "next_to": { "of": "s1", "direction": "down", "buff": 0.25,
+                                   "aligned": "left" } }] },
+        { "id": "a2", "kind": "text", "content": "$\\leftarrow$ 剩下就是这块三角形",
+          "font_size": 24, "color": "GREY",
+          "place": [{ "next_to": { "of": "s2", "direction": "right", "buff": 0.3 } }] },
+
+        { "id": "cap", "kind": "text",
+          "content": "最后一步：把多出来的从方框里减掉",
+          "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] }
+      ],
+      "timeline": [
+        { "do": "write", "target": "cap", "run_time": 1.0 },
+        { "do": "write", "target": "s1", "run_time": 1.0 },
+        { "do": "write", "target": "a1", "run_time": 0.8 },
+        { "do": "write", "target": "s2", "run_time": 1.0 },
+        { "do": "write", "target": "a2", "run_time": 0.8 },
+        { "do": "replace", "target": "cap",
+          "into": { "id": "cap2", "kind": "text",
+                    "content": "所以面积是 7 —— 不好算的图形，先补成好算的，再减掉多出来的",
+                    "font_size": 28, "place": [{ "edge": "down", "buff": 0.8 }] },
+          "run_time": 1.2 },
+        { "do": "indicate", "target": "tri", "run_time": 1.0 },
+        { "do": "wait", "time": 0.8 }
+      ]
+    }
+  ]
+}

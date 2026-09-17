@@ -53,10 +53,17 @@ MARGIN_X, MARGIN_Y = 0.9111, 0.7
 BUDGET_W = round(FRAME_W - 2 * MARGIN_X, 3)      # 12.4
 BUDGET_H = round(FRAME_H - 2 * MARGIN_Y, 3)      # 6.6
 
-# 表格留白：manim `Table` 的默认值（`h_buff=1.3, v_buff=0.8`）。
-# 不写 pad_x/pad_y 时按它算，这样"没给新参数"的分镜估出来的尺寸与现状一致。
-PAD_X_DEFAULT = 1.3
-PAD_Y_DEFAULT = 0.8
+# 表格留白默认值。
+#
+# ⚠️ 2026-09-17 改（用户反馈"表格太大、单元格也太大"）：原来是 manim 的原生默认
+# `h_buff=1.3 / v_buff=0.8`，**太松** —— 3 列光留白就吃掉 3.9 个单位，格子里大半是空白。
+# 降到 0.7 / 0.45：普通文字格子的留白接近"内容撑出的自然格子"，又不至于挤。
+# ⚠️ 改这里的值会改变**所有没写 pad 的表格**的渲染尺寸，所以两处必须同时改：
+#   · `dsl._table()` 里那两个兜底字面量（它只是"手工调用别崩"的兜底，规则在这儿）；
+#   · `tests/test_metrics_calibration.py` 建 manim 表时要传**同一组** h_buff/v_buff，
+#     否则标定变成"拿松留白去对紧留白"，估 ≥ 实测 那条断言会假失败。
+PAD_X_DEFAULT = 0.7
+PAD_Y_DEFAULT = 0.45
 # 但**给了 cell_w/cell_h 的时候不能再按 1.3 算**：cell_w 是"格子的最终宽度"，
 # 而留白 1.3 意味着内容区只剩 cell_w-1.3 —— 想要 1.2 宽的格子就永远做不到
 # （下限是 内容+1.3，实测会直接报"cell_w 定小了"）。所以一旦要求统一格子尺寸，
@@ -167,7 +174,7 @@ def est_block_size(content: str, font_size: float) -> tuple[float, float]:
 
 
 def est_table_size(rows, font_size, cell_w=None, cell_h=None,
-                   pad_x=None, pad_y=None) -> dict:
+                   pad_x=None, pad_y=None, square=False) -> dict:
     """
     表格尺寸估算。返回 dict（不只给宽高，也给"哪一格/哪一列最宽"这类诊断信息，
     报错文案要用它说清"减几列、cell_w 至少要多少"）。
@@ -186,14 +193,17 @@ def est_table_size(rows, font_size, cell_w=None, cell_h=None,
                    for c in range(n_cols)]
     row_content = [max(ch[r], default=0.0) for r in range(n_rows)]
 
-    if cell_w is None:
-        col_w = [w + pad_x for w in col_content]
+    if square:
+        # 正方形格子（`square: true`）：每格边长取"内容+留白"里大的那一侧，长宽都按它 ——
+        # 数字网格 / 矩阵 / 卷积核这类「一格一个数」的表，格子方的好看。
+        # ⚠️ 它和 cell_w/cell_h 表达的是两种意图，同时写时**以 square 为准**（见 _table）。
+        s = max(max(col_content + [0.0]) + pad_x, max(row_content + [0.0]) + pad_y)
+        col_w, row_h = [s] * n_cols, [s] * n_rows
     else:
-        col_w = [float(cell_w)] * n_cols
-    if cell_h is None:
-        row_h = [h + pad_y for h in row_content]
-    else:
-        row_h = [float(cell_h)] * n_rows
+        col_w = ([w + pad_x for w in col_content] if cell_w is None
+                 else [float(cell_w)] * n_cols)
+        row_h = ([h + pad_y for h in row_content] if cell_h is None
+                 else [float(cell_h)] * n_rows)
 
     return {
         "w": sum(col_w),

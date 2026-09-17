@@ -94,6 +94,19 @@ TASK_TTL_DAYS = max(0, _env_int("MSB_TASK_TTL_DAYS", 0))
 # 单条渲染的超时（秒）。前端/网关的超时要调得比它更大（≥120s）。
 RENDER_TIMEOUT = max(30, _env_int("MSB_RENDER_TIMEOUT", 900))
 
+# SSE 心跳间隔（秒），0 = 关掉。
+#
+# 为什么非要有它：生成大纲这条链最长的空档不是渲染，而是**模型思考** ——
+# 开了深度思考的模型正文要等思考走完才出字（实测首字 93s，长思考可达几分钟），
+# 而这段时间后端**一个字节都不发**。连接上长时间没有数据，浏览器、企业网关、
+# 甚至 dev server 的转发层都可能把这条"空闲"连接当成死链掐掉，前端 fetch 抛出的
+# 是 `TypeError: Failed to fetch` —— 用户看到的就是一句"网络错误/超时"，
+# 而服务端那条任务其实跑得好好的。
+#
+# 定期发一条 SSE 注释行（`: ping`）把它变成"一直在动"的流，是唯一不依赖
+# 任何中间层配置的解法。15s 是常见网关 idle 阈值（60s）的安全余量。
+SSE_HEARTBEAT_SEC = max(0, _env_int("MSB_SSE_HEARTBEAT_SEC", 15))
+
 # LLM 最多调用几轮（含校验失败回灌重试）
 LLM_MAX_ATTEMPTS = max(1, _env_int("MSB_LLM_ATTEMPTS", 4))
 LLM_SCENE_ATTEMPTS = max(1, _env_int("MSB_LLM_SCENE_ATTEMPTS", 3))
@@ -104,6 +117,13 @@ LLM_SCENE_ATTEMPTS = max(1, _env_int("MSB_LLM_SCENE_ATTEMPTS", 3))
 # 之前这里也存了一份并显式传给 LLM 调用，结果是"配置文件里的
 # "json_mode": false 被这里传的 True 覆盖掉"——一个典型的静默失效。
 # 现在路由一律不传该参数，由 resolve_config() 说了算。
+#
+# 2026-09-17 补充：**temperature 同理，路由也不再传**（原先 /api/chat 写死 0.2、
+# replace-scene 写死 0.3）。病是一样的：`llm.local.json` 档案里写 "temperature": 0
+# 会被路由传的 0.2 覆盖，而启动横幅打印的是文件里的 0 —— 报的和跑的不是一个数，
+# 用户改设置也没反应。归属同样是 resolve_config()（llm.local.json 的档案 → 默认 0.2）。
+# ⚠️ 目前 temperature **没有环境变量入口**（只有 json_mode 有 MSB_LLM_JSON_MODE）：
+# 部署想统一调温度，要么写进 llm.local.json 的档案，要么走设置页 /api/llm/profile。
 
 # 额外的 LLM 请求头（JSON 串）。有些中转站前面挂着 Cloudflare 一类防护，
 # 不带浏览器 UA / Referer 会直接 403（实测 `error code: 1010`）。
@@ -150,6 +170,7 @@ def as_dict():
         "daily_render_quota": DAILY_RENDER_QUOTA,
         "task_ttl_days": TASK_TTL_DAYS,
         "render_timeout": RENDER_TIMEOUT,
+        "sse_heartbeat_sec": SSE_HEARTBEAT_SEC,
         "llm_max_attempts": LLM_MAX_ATTEMPTS,
         "llm_replay": _env_bool("MSB_LLM_REPLAY", False),
         "llm_show_thinking": LLM_SHOW_THINKING,

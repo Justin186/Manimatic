@@ -63,10 +63,11 @@ async def replace_scene(req: ReplaceSceneRequest):
     async def agen():
         # 先让模型重画这一个分镜（十几秒，期间前端显示该分镜为排队态）
         try:
+            # 同 chat 路由：temperature 由 resolve_config() 说了算（原先这里写死 0.3，
+            # 会让配置文件/设置页里的温度静默失效），见 api/config.py 末尾的说明。
             cfg = llm.resolve_config(provider=config.LLM_PROVIDER or None,
                                      model=config.LLM_MODEL or None,
                                      base_url=config.LLM_BASE_URL or None,
-                                     temperature=0.3,
                                      profile=config.LLM_PROFILE or None)
         except llm.LLMError as e:
             yield events.sse(*events.error(f"LLM 配置有误：{e}", scope="task"))

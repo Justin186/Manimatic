@@ -80,9 +80,10 @@ def test_table_width_grows_with_columns_and_padding():
     assert base["w"] < wider["w"]
     assert tighter["w"] < base["w"]
     assert base["n_cols"] == 3 and base["n_rows"] == 2
-    # 默认留白就是 manim Table 的默认值，这样"没给新参数"估出来的尺寸与现状一致
-    assert base["pad_x"] == metrics.PAD_X_DEFAULT == 1.3
-    assert base["pad_y"] == metrics.PAD_Y_DEFAULT == 0.8
+    # 默认留白（2026-09-17 从 manim 原生的 1.3/0.8 降到 0.7/0.45：原生值太松，
+    # 格子里大半是空白 —— 用户反馈"表格太大、单元格也太大"）
+    assert base["pad_x"] == metrics.PAD_X_DEFAULT == 0.7
+    assert base["pad_y"] == metrics.PAD_Y_DEFAULT == 0.45
 
 
 def test_table_cell_w_makes_every_column_equal():
@@ -92,6 +93,23 @@ def test_table_cell_w_makes_every_column_equal():
     assert fixed["w"] == pytest.approx(2 * 1.5)
     # need_cell_w 是"内容+留白"的下限，报表错文案要用它
     assert fixed["need_cell_w"] > 1.5
+
+
+def test_square_table_makes_cells_square():
+    """
+    `square: true`：格子取正方形（数字网格 / 矩阵 / 卷积核这类"一格一个数"的表）。
+    边长 = max(内容宽+pad_x, 内容高+pad_y) —— 校验层估算与渲染端 `_table()` 是同一套逻辑。
+    """
+    rows = [["1", "2"], ["3", "4"]]
+    sq = metrics.est_table_size(rows, 30, square=True)
+    plain = metrics.est_table_size(rows, 30)
+    assert sq["w"] == pytest.approx(sq["h"]), "2×2 的正方形格子表应当宽高相等"
+    assert sq["h"] > plain["h"], "单格被撑成正方形后，整表比自然排版高"
+    # ⚠️ 「格子是正方形」不等于「整张表是正方形」：非方阵时宽:高 = 列数:行数。
+    # （第一版就写错了这条，被自己抓出来。）
+    for rows_, nc, nr in (([["1"]], 1, 1), ([["1"], ["2"]], 1, 2), ([["1", "2"]], 2, 1)):
+        e = metrics.est_table_size(rows_, 30, square=True)
+        assert e["w"] / nc == pytest.approx(e["h"] / nr), rows_
 
 
 def test_fits_and_shrink_factor():
@@ -124,12 +142,12 @@ def test_effective_pads_switch_to_tight_when_cell_size_is_requested():
     给了 cell_w 就必须换成紧凑留白：`cell_w` 是"格子最终宽度"，而留白 1.3 意味着
     内容区只剩 cell_w-1.3 —— 想要 1.2 宽的格子将永远做不到（下限是 内容+1.3）。
     """
-    assert metrics.effective_pads() == (1.3, 0.8)
-    assert metrics.effective_pads(pad_x=0.5) == (0.5, 0.8)
-    assert metrics.effective_pads(cell_w=1.2) == (metrics.PAD_X_UNIFORM, 0.8)
+    assert metrics.effective_pads() == (0.7, 0.45)
+    assert metrics.effective_pads(pad_x=0.5) == (0.5, 0.45)
+    assert metrics.effective_pads(cell_w=1.2) == (metrics.PAD_X_UNIFORM, 0.45)
     assert metrics.effective_pads(cell_w=1.2, cell_h=0.9) == (metrics.PAD_X_UNIFORM,
                                                               metrics.PAD_Y_UNIFORM)
-    assert metrics.effective_pads(cell_w=1.2, pad_x=0.5) == (0.5, 0.8)      # 显式优先
+    assert metrics.effective_pads(cell_w=1.2, pad_x=0.5) == (0.5, 0.45)     # 显式优先
     # 1.2 宽的格子在紧凑留白下是可行的（内容区 0.85），在 1.3 留白下不可能
     rows = [["2026", "8"]]
     assert metrics.est_table_size(rows, 20, cell_w=1.2)["need_cell_w"] <= 1.2
