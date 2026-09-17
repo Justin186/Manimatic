@@ -19,6 +19,7 @@ Next 在同一台机器上转发过来。要改这一点，就改 web/next.confi
 
 import contextlib
 import importlib.metadata
+import json
 import os
 import shutil
 import sys
@@ -138,6 +139,11 @@ def _banner():
         lines.append(f" LLM 选项: json_mode={cfg.get('json_mode')}  "
                      f"temperature={cfg.get('temperature')}  "
                      f"max_tokens={cfg.get('max_tokens')}")
+        # extra_body 打出来是**必需的**，不是可选的调试信息：
+        # 它现在承载"关思考"这类开关，而"模型为什么不吐正文/为什么在思考"
+        # 正是最难靠猜判断的一件事（§8.69 那几个坑都在这一带）。
+        if cfg.get("extra_body"):
+            lines.append(" LLM 私有 : " + json.dumps(cfg["extra_body"], ensure_ascii=False))
         # 提示词体积：以前只能手工量。示例越攒越多时，这个数决定"规则会不会被淹没"
         # （窗口是 1M，撑不爆；要盯的是质量稀释，见 HANDOFF §8.59）。
         st = llm.prompt_stats()

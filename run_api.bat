@@ -16,6 +16,32 @@ REM                           (thinking_delta). Needed for a "thinking..."
 REM                           indicator. Shows raw reasoning, so it is opt-in.
 REM    MSB_LLM_REPLAY         1 = replay mode: reuse logged replies, no API
 REM                           call (saves money when iterating)
+REM
+REM    MSB_VI_ALLOW           auto | always | never   (image input, default auto)
+REM                           auto   = reject models known to be text-only,
+REM                                    let the API decide for the rest
+REM                           always = never gate locally (use when you know
+REM                                    the model reads images but its name is
+REM                                    not in the allow pattern)
+REM                           never  = reject all image input
+REM    MSB_VI_PROFILE         *** READ THIS IF IMAGE UPLOAD IS REJECTED ***
+REM                           Which profile in llm.local.json is used for
+REM                           reading images. Empty = reuse the active one.
+REM                           The currently active profile is "direct"
+REM                           (deepseek-chat, the cheap text-only one), which
+REM                           CANNOT read images. Setting this to "relay"
+REM                           keeps storyboard generation on the cheap model
+REM                           and only switches to the vision-capable one for
+REM                           the image request - so you are not paying relay
+REM                           prices for text-only rounds.
+REM    MSB_VI_MODEL           same idea, but pins a model name instead
+REM    MSB_VI_MAX_IMAGES      max images per request (default 4)
+REM    MSB_VI_ALLOW_URL       1 = also accept {"url": "https://..."} images
+REM                           (default 0: base64 only, keeps the SSRF surface
+REM                           closed)
+REM
+REM  Image input lives in storyboard/vision.py + POST /api/chat's optional
+REM  "images" field. There is no plugin directory any more.
 REM ============================================================
 
 cd /d D:\Manimatic\MathStoryboard
@@ -23,17 +49,34 @@ set PY=D:\Miniconda\envs\manim\python.exe
 set PYTHONIOENCODING=utf-8
 
 REM ---- LLM switches ----
-REM empty = use llm.local.json "active" (currently: relay)
+REM empty = use llm.local.json "active" (currently: direct)
 set MSB_LLM_PROFILE=
 REM push reasoning as thinking_delta so the UI can show progress
 set MSB_LLM_SHOW_THINKING=1
 REM 1 = replay from output/_llm/calls.jsonl instead of calling the API
 set MSB_LLM_REPLAY=0
 
+REM ---- image input switches (storyboard/vision.py) ----
+REM auto = blacklist known text-only models, let the API decide the rest
+set MSB_VI_ALLOW=auto
+
+REM *** Left empty: read images with whatever profile is active. ***
+REM This used to be "relay" because deepseek-chat was believed to be text-only.
+REM That belief was WRONG - measured on 2026-09-17: deepseek-chat reads images
+REM fine (0.8s, correctly read "x^2 - 5x + 6 = 0" from a photo). The blacklist
+REM in storyboard/vision.py was the thing blocking uploads, not the model.
+REM Set this to a profile name only if the active model genuinely cannot read
+REM images (you will get a readable error saying so).
+set MSB_VI_PROFILE=
+
+set MSB_VI_MAX_IMAGES=4
+
 echo ============================================
 echo  Manimatic API   http://localhost:8000/docs
 echo  profile=%MSB_LLM_PROFILE%  (empty = llm.local.json active)
 echo  show_thinking=%MSB_LLM_SHOW_THINKING%
+echo  vi_allow=%MSB_VI_ALLOW%  vi_profile=%MSB_VI_PROFILE%  vi_max_images=%MSB_VI_MAX_IMAGES%
+echo  endpoints: POST /api/chat (accepts optional "images")
 echo ============================================
 echo.
 

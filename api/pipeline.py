@@ -46,7 +46,7 @@ import threading
 import time
 import traceback
 
-from storyboard import dsl, latex_env, renderer, schema, templates, tex_batch
+from storyboard import dsl, latex_env, llm, renderer, schema, templates, tex_batch
 
 from . import config, events, store
 
@@ -62,17 +62,30 @@ def _log(msg):
 
 class Canceller:
     """
-    取消令牌 + "正在跑的子进程"登记处。
+    取消令牌 + "可强制中断的资源"登记处。
 
-    为什么要登记进程、而不是只 set 一个标志：客户端断开时上层只知道"该停了"，
-    但 `for line in proc.stdout` 正阻塞在 readline 上，而且**一个分镜可能要渲十几秒**——
-    等下一次读到行才看到标志，等于白发十几秒 CPU，还占着并发额度不让排队的人进来。
-    把进程登记进来，cancel() 就能立刻 kill 它，readline 随即返回 EOF。
+    为什么要登记资源、而不是只 set 一个标志：客户端断开时上层只知道"该停了"，
+    但调用方正**阻塞**在某个 read 上：
+      · `for line in proc.stdout`（渲染）——一个分镜要渲十几秒；
+      · `for raw in resp`（LLM 流式）——开着深度思考时要等几分钟。
+    等下一次读到东西才看到标志，等于白发那一段 CPU、还占着并发额度。
+
+    所以把"能被 close()/kill() 打断的对象"登记进来，cancel() 就地掐断它，
+    阻塞的 read 随即返回 EOF/抛 OSError。
+
+    ⚠️ **LLM 那条路是后补的**（原先只有子进程）。修的 bug 是：
+       点"停止"后模型照跑、token 照烧 —— 因为 LLM 调用是线程里阻塞读一条
+       HTTP 流，而 `_procs` 里没有任何东西属于它，cancel() 手上有劲没处使。
+       现在 llm.py 通过 `watch(resp)` 把响应对象交进来（见 storyboard/llm.py
+       的取消令牌说明）。
     """
 
     def __init__(self):
         self.event = threading.Event()
         self._procs = set()
+        # 可 close() 即中断的对象（HTTP 响应）。与 _procs 分开存：
+        # 一个调 kill()、一个调 close()，语义不同，混在一起要靠 isinstance 猜。
+        self._closables = set()
         self._lock = threading.Lock()
 
     def is_set(self):
@@ -94,13 +107,38 @@ class Canceller:
         with self._lock:
             self._procs.discard(proc)
 
+    # ---- 可 close() 中断的资源（llm.py 的取消令牌契约要求这两个方法）----
+
+    def watch(self, obj):
+        """登记一个"close() 就能打断阻塞读"的对象。已取消则就地关掉它。"""
+        with self._lock:
+            if self.event.is_set():
+                try:
+                    obj.close()
+                except Exception:                               # noqa: BLE001
+                    pass
+                return
+            self._closables.add(obj)
+
+    def unwatch(self, obj):
+        with self._lock:
+            self._closables.discard(obj)
+
     def cancel(self):
         self.event.set()
         with self._lock:
             procs = list(self._procs)
+            closables = list(self._closables)
+            # 清空：这些对象马上要被关掉，留着它们只会在长时间运行里越攒越多
+            self._closables.clear()
         for p in procs:
             try:
                 p.kill()
+            except Exception:                                   # noqa: BLE001
+                pass
+        for c in closables:
+            try:
+                c.close()
             except Exception:                                   # noqa: BLE001
                 pass
 
@@ -612,12 +650,26 @@ async def stream(run, cancel):
                 return                # 事件循环已关，收工
 
     def body():
+        # ★ 把取消令牌登记进**这个线程**的上下文里。
+        #
+        # ⚠️ 必须在这里（线程体内部）set，不能在外面 set 完再起线程：
+        #    ContextVar **不会**自动继承进新线程 —— 在外面设的那个只属于调用方
+        #    上下文，线程里 `_CANCEL_TOKEN.get()` 拿到的是 None，于是
+        #    llm.py 的 check_cancelled() 永远不触发，"停止"又回到停不掉的状态。
+        #    这个坑很隐蔽：不报错、不打日志，只是"按钮点了没反应"。
+        token = llm.set_cancel_token(cancel)
         try:
             run(push)
+        except llm.LLMCancelled:
+            # 用户主动停止：**不是故障**，不能走下面那条 error 分支 ——
+            # 那会让前端在用户刚刚按下"停止"之后弹一条红色报错。
+            # 也不打 traceback：这是预期路径，不是异常。
+            _log("客户端停止，已中断模型调用")
         except Exception as e:        # 兜底：任何异常都要变成一条 error，不能让流无声无息断掉
             traceback.print_exc()
             push(*events.error(f"服务端异常：{type(e).__name__}: {e}", scope="task"))
         finally:
+            llm.reset_cancel_token(token)
             try:
                 loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
             except RuntimeError:

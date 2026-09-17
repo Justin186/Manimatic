@@ -74,22 +74,55 @@ async def replace_scene(req: ReplaceSceneRequest):
             yield events.sse(*events.done("m_" + req.message_id))
             return
 
+        # ★ 这一段模型调用必须走 pipeline.stream —— 两个理由，都不能省：
+        #
+        #  1) **可停止**：regenerate_scene 内部是阻塞的 HTTP 读（十几秒，深度思考时更久）。
+        #     直接在事件循环里同步调它，等于既占着事件循环、又收不到取消令牌，
+        #     用户点"停止"完全无效（和 /api/chat 修的是同一个 bug）。
+        #  2) **不阻塞事件循环**：它原先就跑在 agen 里，整个服务在那十几秒内
+        #     无法处理任何其它请求（连心跳都发不出去）。
+        #
+        # 用一个单槽 list 把结果带出来：run() 在**工作线程**里执行，
+        # 返回值没法直接给 agen，而异常要照旧走下面那两条 except。
+        box = {}
+
+        def run(push):
+            try:
+                box["scene"] = llm.regenerate_scene(
+                    instruction=instruction,
+                    scene=scenes[idx],
+                    registry=templates.TEMPLATE_REGISTRY,
+                    cfg=cfg,
+                    context={"title": raw.get("title", ""), "index": idx, "total": n},
+                    duration_sec=req.durationSec,
+                    max_attempts=config.LLM_SCENE_ATTEMPTS,
+                    # json_mode 同样交给 llm.resolve_config()（见 config.py 里的注释）
+                )
+            except llm.LLMError as e:
+                # 包装成一条 error 事件推出去，让前端拿到和以前一样的提示。
+                # LLMCancelled 不在其列（它不是 LLMError），会照常冒到 pipeline
+                # 被识别成"用户停止"。
+                box["error"] = e
+
         try:
-            new_scene = llm.regenerate_scene(
-                instruction=instruction,
-                scene=scenes[idx],
-                registry=templates.TEMPLATE_REGISTRY,
-                cfg=cfg,
-                context={"title": raw.get("title", ""), "index": idx, "total": n},
-                duration_sec=req.durationSec,
-                max_attempts=config.LLM_SCENE_ATTEMPTS,
-                # json_mode 同样交给 llm.resolve_config()（见 config.py 里的注释）
-            )
-        except llm.LLMError as e:
-            # 改不动就让用户看到原因（这一层失败**不会**影响已经渲好的成片）
-            yield events.sse(*events.error(f"这个分镜没能改好：{e}", scope="task"))
+            cancel = pipeline.new_cancel()
+            async for chunk in events.encode_stream(pipeline.stream(run, cancel)):
+                yield chunk
+        except jobs.QuotaExceeded as e:
+            yield events.sse(*events.error(str(e), scope="task"))
             yield events.sse(*events.done("m_" + req.message_id))
             return
+
+        if "error" in box:
+            # 改不动就让用户看到原因（这一层失败**不会**影响已经渲好的成片）
+            yield events.sse(*events.error(f"这个分镜没能改好：{box['error']}", scope="task"))
+            yield events.sse(*events.done("m_" + req.message_id))
+            return
+        if "scene" not in box:
+            # 被用户停止：不开新内容、也不报错，直接收尾（前端已自行停在中止态）
+            yield events.sse(*events.done("m_" + req.message_id))
+            return
+        new_scene = box["scene"]
 
         # new_scene 是模型原样输出（raw），不能是 schema 规范化过的产物：
         # 整份分镜只能有一种形态，规范化只发生在 pipeline._validate() 一处。

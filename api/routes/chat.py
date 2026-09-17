@@ -19,7 +19,7 @@ import uuid
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from storyboard import llm, templates
+from storyboard import llm, templates, vision
 
 from .. import config, events, pipeline, store
 from ._common import error_stream, sse_response
@@ -42,6 +42,14 @@ class ChatRequest(BaseModel):
     # 不落盘的话，刷新后谁也不知道该拿哪个 id 去取分镜 —— 后端存着全套产物也读不回来。
     message_id: str = ""
     user_message_id: str = ""
+    # ★ 题目图片（base64 或 data URL）。不传/为空 = 与以前完全一致（纯文字）。
+    #
+    # ⚠️ 有意**不做成 multipart**：这条链路的响应是 SSE，而 multipart 在前端要另写
+    #    一套（FormData + 不能带 Content-Type 头）；base64 直接放进已有的 JSON 请求体，
+    #    前端改动最小、curl 调试也最直观。代价是体积大 37%，但图已在 vision 层压到 4MB 内。
+    #
+    # ⚠️ 这个字段**只进不出**：图片不落盘、不进历史（见下面落盘那段的说明）。
+    images: list[dict] | None = None
 
 
 _ROLE_LABEL = {"student": "学生", "parent": "家长", "teacher": "教师"}
@@ -78,7 +86,9 @@ def _extra_rules(req: ChatRequest):
 @router.post("/chat")
 async def chat(req: ChatRequest):
     topic = (req.message or "").strip()
-    if not topic:
+    raw_images = [it for it in (req.images or []) if it]
+    # 只传了图、没写字是**合法**的一次提问（拍照搜题最常见的形式）
+    if not topic and not raw_images:
         return sse_response(error_stream("题目是空的，先在输入框里写一道题", scope="task"))
 
     # 前端带了 id 就用它的 —— 两边共用同一个 id 是整条恢复链路的前提：
@@ -93,16 +103,52 @@ async def chat(req: ChatRequest):
             # （llm.local.json 的档案 → 默认 0.2）。路由层写死 0.2 会让设置页/配置文件里
             # 改的温度**静默失效**，而启动横幅打印的又是配置文件里的值 —— 报的和跑的不是
             # 一个数，与 §8.2 那个 json_mode 的坑同形。
-            cfg = llm.resolve_config(provider=config.LLM_PROVIDER or None,
-                                     model=config.LLM_MODEL or None,
-                                     base_url=config.LLM_BASE_URL or None,
-                                     profile=config.LLM_PROFILE or None)
+            base_cfg = llm.resolve_config(provider=config.LLM_PROVIDER or None,
+                                          model=config.LLM_MODEL or None,
+                                          base_url=config.LLM_BASE_URL or None,
+                                          profile=config.LLM_PROFILE or None)
         except llm.LLMError as e:
             # 配置类错误（没 key / 未知厂商）要在**发起请求前**报出来，
             # 否则会等成一次看不懂的超时。
             push(*events.error(f"LLM 配置有误：{e}", scope="task"))
             push(*events.done(mid))
             return
+
+        # ---- 图片（可选）：配置 → 能力闸口 → 规范化 ----
+        # 三段都**先于**任何落盘：图不合法时这一轮根本不该在会话里留下痕迹。
+        vcfg = vision.load_config()
+        cfg, note = base_cfg, ""
+        images = []
+        if raw_images:
+            try:
+                # 读图可以单独用一个模型档（当前档是纯文本模型时的常见情形）
+                cfg, note = vision.resolve_vision_config(
+                    base_cfg, vcfg,
+                    provider=config.LLM_PROVIDER or None,
+                    base_url=config.LLM_BASE_URL or None)
+                # 明确不支持就直接说清楚，而不是等接口回一个含糊的 400
+                vision.ensure_can_read_images(cfg, vcfg)
+                images, warns = vision.normalize_many(raw_images, vcfg)
+            except vision.VisionConfigError as e:
+                push(*events.error(f"LLM 配置有误：{e}", scope="task"))
+                push(*events.done(mid))
+                return
+            except vision.VisionUnsupported as e:
+                push(*events.error(str(e), scope="task"))
+                push(*events.done(mid))
+                return
+            except vision.ImageRejected as e:
+                # 校验类错误（不是 PNG、太大、张数超限）要**原样**报给用户：
+                # 它们是可操作的，混进"生成失败"就浪费了。
+                push(*events.error(f"{e}", scope="task"))
+                push(*events.done(mid))
+                return
+            if vcfg.verbose:
+                orig = sum(x.get("original_bytes") or 0 for x in images)
+                now = sum(x["bytes"] for x in images)
+                print(f"      [VI] 图片 {len(images)} 张："
+                      f"{orig // 1024}KB → {now // 1024}KB（已降采样）"
+                      + (f"；{note}" if note else ""), flush=True)
 
         # 多轮上下文：把这个会话之前的对话喂给模型。
         # 不带的话，「生成对应视频」这种追问会被模型当成"你没给题目"——
@@ -119,8 +165,12 @@ async def chat(req: ChatRequest):
         #
         # meta 里带上前端给的那个 id：恢复会话时要把这条 user 气泡也放回原位。
         # 没有它就只能靠"role + 顺序"猜，连续两条 user 消息会错位。
+        #
+        # ⚠️ 只传了图没写字时，给历史一个占位符（图**不进历史**，见落盘那段）——
+        #    否则这一轮在历史里是空的，下一轮追问"第二问再讲一遍"会失去指代对象。
+        record_text = topic or f"（上传了 {len(images)} 张题目图片）"
         store.append_thread_message(
-            req.thread_id, "user", topic,
+            req.thread_id, "user", record_text,
             meta={"message_id": req.user_message_id} if req.user_message_id else None)
 
         def on_delta(text):
@@ -149,9 +199,15 @@ async def chat(req: ChatRequest):
                 on_delta=on_delta,
                 on_thinking=on_thinking,
                 history=past,
+                # 空列表 = 老路径（content 仍是纯字符串，请求体逐字节不变）
+                images=images,
             )
         except llm.LLMError as e:
-            push(*events.error(f"生成失败：{e}", scope="task"))
+            # 带图时，厂商对"拿纯文本模型发图"通常只回一句含糊的
+            # `400 messages[0].content must be a string`，用户看不出问题在哪。
+            # 这里翻译成人话（含下一步动作）再抛给前端。
+            is_vision, human = vision.explain_api_error(str(e), cfg.get("model"))
+            push(*events.error(f"生成失败：{human if is_vision else e}", scope="task"))
             push(*events.done(mid))
             return
 
@@ -187,14 +243,19 @@ async def chat(req: ChatRequest):
                   # 一起发出去（见 llm._history_with_storyboards）——多轮改一版全靠它。
                   # ⚠️ 不进 content：那是给人看的（前端聊天框显示的就是它），
                   #    塞几千字 JSON 会把界面撑坏。
-                  "storyboard": raw})
+                  "storyboard": raw,
+                  # 图片**只留摘要**（尺寸/指纹），绝不存 base64：一张图几百 KB，
+                  # 存进会话会让 /api/threads/<id> 返回几 MB 的 JSON。
+                  # 摘要留着只为一件事：排查"当时到底传了几张、多大"。
+                  "images": vision.describe_images(images)})
 
         # 落盘：confirm 只会发 thread_id + message_id，分镜本体必须由后端记住。
         store.save_thread_storyboard(req.thread_id, raw, plan=sb.get("outline") or [])
         # 把"思考了多少字 / 正文多少字"打出来：开了深度思考的模型，
         # 这两个数的比例直接决定首字延迟，排查"怎么这么慢"时一眼就能看到
         # 是模型在思考还是链路卡住了。
-        print(f"[api] chat topic={topic[:40]!r} -> {len(sb['scenes'])} 分镜 "
+        print(f"[api] chat topic={topic[:40]!r} imgs={len(images)} "
+              f"-> {len(sb['scenes'])} 分镜 "
               f"intent={sb.get('intent')} attempts={res['attempts']} "
               f"streamed={res.get('streamed')} "
               # 带上"有没有上一版"：排查"改了没生效"时第一眼就看这里

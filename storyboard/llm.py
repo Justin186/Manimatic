@@ -33,6 +33,7 @@ requirements.txt 只有 manim + numpy。为了少一个依赖（以及少一类"
 没有流式、没有 function call 的需求，SDK 带来的主要是便利而非能力。
 """
 
+import contextvars
 import http.client
 import json
 import os
@@ -50,6 +51,81 @@ from . import schema
 class LLMError(Exception):
     """LLM 调用/解析/重试耗尽。渲染前抛出，绝不带到渲染阶段。"""
     pass
+
+
+class LLMCancelled(Exception):
+    """
+    用户主动停止（客户端断开），模型调用被就地中断。
+
+    ⚠️ **刻意不做 LLMError 的子类**，这一点是整个机制的关键：
+       `chat_stream` / `stream_storyboard` / `generate_storyboard` 里全都是
+       `except LLMError`，而那些分支的语义是"这次调用失败，换个方式再来一遍"
+       —— 尤其是 `stream_storyboard` 那条"流式不可用 → 退回非流式重试"的降级，
+       会把取消当故障处理，**立刻再发一次完整的 LLM 请求**。
+       用户按的是"停止"，结果换来一轮更长时间的等待和账单，比不修还糟。
+
+    不继承 LLMError，它就会穿过所有那些 `except LLMError`，一路冒到
+    `api/pipeline.py::stream()` 的线程体里被单独接住 —— 那里知道"这是取消，不是故障"。
+    """
+
+
+# ==============================================================================
+# 取消令牌：让"用户点了停止"能真正掐断模型调用
+# ==============================================================================
+# 背景（这是一个真实修过的 bug）：停止按钮原先**停不掉模型**。
+#
+# `api/pipeline.py::Canceller` 只登记**子进程**（渲染用），而 LLM 调用是
+# `for raw in resp:` 阻塞读一条 HTTP 流 —— 没有任何东西会去中断它。所以点了停止：
+# 浏览器那条连接确实断了、`stream()` 的 finally 也确实调了 `cancel()`，
+# 但没有任何进程可杀、没有连接可关 → 工作线程继续阻塞在 read 上，
+# **模型继续吐 token、继续计费**；`push()` 因为事件循环已关而静默丢弃，
+# 最后还会把整份结果落盘。用户以为停了，账单和 CPU 都不同意。
+#
+# 为什么走 ContextVar 而不是"给每个函数加参数"：
+#   `chat` / `chat_stream` 的调用方有五六处（普通问答、分镜生成、重画分镜…），
+#   加参数就得逐个改签名，漏一处就静默退化回"停不掉"。
+#   取消是**这一次请求**的上下文属性，不是业务参数，ContextVar 正好对应。
+#
+# ⚠️ ContextVar 不会自动进入新线程 —— 所以 `pipeline.stream()` 必须在
+#    **起线程之后、跑 run() 之前**在**那个线程里**设置它。见 api/pipeline.py。
+_CANCEL_TOKEN = contextvars.ContextVar("msb_llm_cancel", default=None)
+
+
+def set_cancel_token(token):
+    """
+    在当前上下文里登记取消令牌。返回 token，供调用方 reset（用完必须还原）。
+
+    令牌的契约（鸭子类型，避免 llm.py 反向依赖 api/）：
+        token.is_set()          -> bool，是否已被取消
+        token.watch(obj)        -> 登记一个"可强制中断"的资源（如 HTTP 响应），
+        token.unwatch(obj)      -> 注销
+        取消时令牌负责对每个 watch 过的对象调用 obj.close()
+    """
+    return _CANCEL_TOKEN.set(token)
+
+
+def reset_cancel_token(token):
+    try:
+        _CANCEL_TOKEN.reset(token)
+    except (ValueError, LookupError):
+        pass
+
+
+def current_cancel_token():
+    return _CANCEL_TOKEN.get()
+
+
+def check_cancelled():
+    """
+    若已取消则抛 LLMCancelled，否则什么都不做。
+
+    调用点有两种：
+      · 循环里（每收到一个增量调一次）—— 保证"停止"最多延迟一个增量生效；
+      · 建连前 —— 已经取消的请求不该再白发一次网络请求。
+    """
+    token = _CANCEL_TOKEN.get()
+    if token is not None and token.is_set():
+        raise LLMCancelled("用户已停止生成")
 
 
 # ==============================================================================
@@ -168,6 +244,26 @@ def replay_enabled():
     return _as_bool(_first_env(("MSB_LLM_REPLAY",)), False)
 
 
+def _merge_extra_body(payload, cfg):
+    """
+    把 `cfg["extra_body"]` 原样并进请求体（**不覆盖**已存在的标准字段）。
+
+    为什么要留这个出口：各厂商"关思考 / 调思考"的参数名完全不统一，而且都不是
+    OpenAI 标准 —— DeepSeek 官方是 `{"thinking": {"type": "disabled"}}`，
+    别家还有 `enable_thinking` / `reasoning_effort` 等等。在代码里硬编码任何一家
+    都会误导下一家适配（而且没法改）。所以做成透传槽位，由使用方按文档填进档案。
+
+    ⚠️ **不覆盖标准字段**（`payload.setdefault`）：
+       用户手滑在 extra_body 里写个 `model` 是不该生效的 —— 那会让"我明明切了档
+       却还是老模型"这种静默失效重新出现。标准字段的唯一归属是 resolve_config()。
+    """
+    extra = cfg.get("extra_body") or {}
+    if not isinstance(extra, dict):
+        return
+    for k, v in extra.items():
+        payload.setdefault(str(k), v)
+
+
 def _merge_cfg(cfg, src, from_file, only_missing=False):
     """
     把一份配置字典合并进 cfg（llm.local.json 的两种形态共用这一份逻辑）。
@@ -195,6 +291,18 @@ def _merge_cfg(cfg, src, from_file, only_missing=False):
                 if only_missing and k in from_file:
                     continue
                 cfg["headers"] = {str(a): str(b) for a, b in v.items() if b}
+                from_file.add(k)
+            continue
+        if k == "extra_body":
+            # extra_body 也是 dict（原样进请求体的服务商私有参数）。
+            # ⚠️ 与 headers 同理：必须在这里显式处理，不能指望下面那行
+            #    `if k in cfg` 兜住 —— 那个判断只放行**已有键**，
+            #    而 extra_body 的每个子键（thinking / reasoning_effort…）都不在 cfg 里。
+            #    不写这一段的话，配置里写了等于没写（§8.2 那个静默失效的同一形态）。
+            if isinstance(v, dict):
+                if only_missing and k in from_file:
+                    continue
+                cfg["extra_body"] = dict(v)
                 from_file.add(k)
             continue
         if k in cfg and v is not None and v != "":
@@ -230,7 +338,17 @@ def resolve_config(provider=None, model=None, base_url=None, api_key=None,
     """
     cfg = {"provider": DEFAULT_PROVIDER, "base_url": "", "model": "",
            "api_key": "", "temperature": 0.2, "max_tokens": 8192, "timeout": 180,
-           "headers": {}, "json_mode": True, "profile": ""}
+           "headers": {}, "json_mode": True, "profile": "",
+           # 服务商私有参数，**原样**并进请求体（不进 payload 的标准字段）。
+           # 用途：不同厂商的"关思考/调思考"开关名字完全不一样 ——
+           #   DeepSeek 官方是 {"thinking": {"type": "disabled"}}
+           #   有的站是 {"enable_thinking": false} / {"reasoning_effort": "..."}
+           # 这些既不是 OpenAI 标准、也不该在代码里硬编码（会误导下一家适配），
+           # 所以做成一个透传槽位，由使用者按自己那家服务商的文档填。
+           # ⚠️ 它是**部署/档案级**参数，不是每次调用都要变的东西 ——
+           #    所以只从配置文件读，不做成 resolve_config() 的显式参数。
+           "extra_body": {}}
+    from_file = set()          # 记录 llm.local.json 里出现过的键，用来实现"文件 > 环境变量"
     from_file = set()          # 记录 llm.local.json 里出现过的键，用来实现"文件 > 环境变量"
 
     # 0) 本地配置文件（存在才读；密钥不进 git）
@@ -390,13 +508,44 @@ def _http_post_json(url, headers, payload, timeout):
     只有解析后的 `choices[0].message.content` 会丢掉 `usage`、reasoning 等
     排查时最需要的东西。多返回一个字符串，比让调用方再发一次请求便宜得多。
     """
+    # 建连前先看一眼：已经取消的请求不该再白发一次（非流式这条路同样要能停 ——
+    # stream_storyboard 的**重试轮**走的正是它，不加这一手会出现
+    # "首轮停掉了、重试轮又发了一次完整请求"）。
+    check_cancelled()
+
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     for k, v in headers.items():
         req.add_header(k, v)
+    token = _CANCEL_TOKEN.get()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", "replace")
+            # 与 _http_post_json_stream 同理：resp.read() 会一直阻塞到整个响应体读完，
+            # 深度思考几分钟时这一段同样是"停不掉"的黑洞。登记后 cancel() 一 close，
+            # read 立刻抛 OSError。
+            if token is not None:
+                try:
+                    token.watch(resp)
+                except Exception:                           # noqa: BLE001
+                    token = None
+            try:
+                body = resp.read().decode("utf-8", "replace")
+            except Exception:                               # noqa: BLE001
+                # 先分清"用户取消"与"真断流"，两者的处理完全相反。
+                #
+                # ⚠️ 这里**不能只 catch OSError**：取消时我们 close() 响应，
+                #    而读线程可能正停在 http.client 内部的 `fp.peek()` 上 ——
+                #    close() 把 fp 置成 None，抛出来的是
+                #    `AttributeError: 'NoneType' object has no attribute 'peek'`。
+                #    与 _http_post_json_stream 里踩到的是同一个坑。
+                check_cancelled()
+                raise
+            finally:
+                if token is not None:
+                    try:
+                        token.unwatch(resp)
+                    except Exception:                       # noqa: BLE001
+                        pass
     except urllib.error.HTTPError as e:
         # 错误体里通常有厂商的中文说明，截一段出来 —— 比只报状态码有用得多
         detail = ""
@@ -476,6 +625,11 @@ def chat(messages, cfg, json_mode=False, purpose="chat", seen=None):
         # 这也是为什么"要不要开"必须由上层业务决定，而不是底层自动继承配置。
         payload["response_format"] = {"type": "json_object"}
 
+    # ★ 服务商私有参数（如 DeepSeek 的 {"thinking": {"type":"disabled"}}）原样并进去。
+    #    ⚠️ 必须在 `cache_key()` **之前**：留档指纹要含它。否则"改了思考开关"
+    #       会命中旧回复（回放模式下尤其误导：配置变了，拿到的还是老结果）。
+    _merge_extra_body(payload, cfg)
+
     key = llm_log.cache_key(payload)
 
     # 回放：命中历史留档就不发请求。purpose 一并参与匹配，免得把"重画一个分镜"
@@ -497,6 +651,15 @@ def chat(messages, cfg, json_mode=False, purpose="chat", seen=None):
     try:
         resp, _raw = _http_post_json(endpoint(cfg["base_url"]), headers, payload,
                                      cfg.get("timeout", 180))
+    except LLMCancelled:
+        # 非流式这条路也要留档：它是 stream_storyboard 的**重试轮**走的路径，
+        # 用户点停止时很可能正卡在这一轮。不记的话留档里会出现
+        # "上一轮 ok=true、然后什么都没有"的空白，看不出是用户停了还是进程崩了。
+        llm_log.record(purpose=purpose, model=cfg["model"], base_url=cfg["base_url"],
+                       key=key, ok=False, seconds=time.time() - t0,
+                       error="用户已停止生成（cancelled）",
+                       messages=messages, json_mode=json_mode)
+        raise
     except LLMError as e:
         # 失败也要留档：调 prompt 时"这一版把模型逼到 400 了"同样是关键信息
         llm_log.record(purpose=purpose, model=cfg["model"], base_url=cfg["base_url"],
@@ -678,6 +841,9 @@ def _http_post_json_stream(url, headers, payload, timeout, seen=None):
     `seen` 会被透传给 _iter_sse_stream，用来把 usage / finish_reason 带出来
     （流式没有"整个响应体"可回看，只能边读边记）。
     """
+    # 建连前先看一眼：已经取消的请求不该再白发一次网络请求（也省一条计费可能）
+    check_cancelled()
+
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     for k, v in headers.items():
@@ -710,16 +876,62 @@ def _http_post_json_stream(url, headers, payload, timeout, seen=None):
         raise LLMError(f"连不上 LLM 接口：{e.reason}\n{url}")
     except TimeoutError:
         raise LLMError(f"LLM 接口超时（>{timeout}s）\n{url}")
+    # ★ 把响应对象交给取消令牌登记。
+    #
+    # 为什么必须这样：下面 `for raw in resp:` 是**阻塞**读 —— 没有这一手的话，
+    # 点"停止"之后线程会一直卡在 readline 上，等到上游把这一轮吐完（或读超时）
+    # 才醒来：模型照跑、token 照烧，用户以为停了其实没停。
+    # 登记之后 cancel() 会 close() 这个响应，read 立刻抛 OSError → 循环退出。
+    token = _CANCEL_TOKEN.get()
+    if token is not None:
+        try:
+            token.watch(resp)
+        except Exception:                                   # noqa: BLE001
+            token = None            # 令牌不认这个契约也不该把正常调用弄挂
     with resp:
         try:
-            yield from _iter_sse_stream(resp, seen)
-        except (OSError, http.client.HTTPException) as e:
-            # ⚠️ 读到一半断流 / 读超时**必须在这里就地包成 LLMError**。
-            # 不包的话它以原形冒上去：上层（chat_stream / stream_storyboard / 路由）
-            # 全都是 `except LLMError`，一个都接不住，最后落在 pipeline 的兜底分支里
-            # 变成「服务端异常：TimeoutError」——不留档、没有收到多少思考，
-            # 也分不清它和"被截断"的区别（HANDOFF §8.35）。
-            raise LLMError(_stream_break_message(e, timeout, seen)) from e
+            # 循环里再兜一道：close() 与 read 之间有竞态（可能刚好读完一块），
+            # 每轮检查一次能保证"停止"最多延迟一个增量生效。
+            for kind, piece in _iter_sse_stream(resp, seen):
+                check_cancelled()
+                yield kind, piece
+        except LLMCancelled:
+            raise
+        except Exception as e:                              # noqa: BLE001
+            # ⚠️ 这里**不能只 catch (OSError, HTTPException)** —— 实测踩到了：
+            #
+            #   取消时我们 close() 这个响应，而读线程正阻塞在 `resp.fp.peek()` 上。
+            #   close() 把 `resp.fp` 置成 None，读线程随即抛的是
+            #       AttributeError: 'NoneType' object has no attribute 'peek'
+            #   **不是 OSError**。只 catch OSError 的话它接不住，会一路冒到
+            #   pipeline 的兜底分支变成「服务端异常：AttributeError」——
+            #   既没留档，也没被识别成取消，"停止"等于还是失效（第一次改就栽在这）。
+            #
+            # 所以顺序是：**先问令牌"是不是被取消了"**，再决定怎么包装。
+            # `check_cancelled()` 在已取消时抛 LLMCancelled（穿到 pipeline，不重试、不报错）。
+            check_cancelled()
+            # 没被取消 → 才按"真故障"处理。
+            if isinstance(e, (OSError, http.client.HTTPException, AttributeError)):
+                # ⚠️ 读到一半断流 / 读超时**必须在这里就地包成 LLMError**。
+                # 不包的话它以原形冒上去：上层（chat_stream / stream_storyboard / 路由）
+                # 全都是 `except LLMError`，一个都接不住，最后落在 pipeline 的兜底分支里
+                # 变成「服务端异常：TimeoutError」——不留档、没有收到多少思考，
+                # 也分不清它和"被截断"的区别（HANDOFF §8.35）。
+                #
+                # AttributeError 一起收进来：上面那个竞态的**非取消**版本
+                # （上游刚好在别的路径上关掉了 fp）症状与断流完全一致，
+                # 报成"连接中断"比报成"NoneType has no attribute peek"有用得多。
+                raise LLMError(_stream_break_message(e, timeout, seen)) from e
+            # 其它异常是**真 bug**，原样抛出去 —— 包装成"断流"会把方向带偏。
+            raise
+        finally:
+            # 无论怎么退出（正常读完 / 断流 / 取消）都要注销，
+            # 否则令牌会一直攥着一个已关闭的响应对象（长会话里越攒越多）。
+            if token is not None:
+                try:
+                    token.unwatch(resp)
+                except Exception:                           # noqa: BLE001
+                    pass
 
 
 def chat_stream(messages, cfg, json_mode=False, purpose="chat", on_reasoning=None,
@@ -757,6 +969,9 @@ def chat_stream(messages, cfg, json_mode=False, purpose="chat", on_reasoning=Non
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
 
+    # 服务商私有参数（同 chat()：必须在 cache_key 之前，指纹要含它）
+    _merge_extra_body(payload, cfg)
+
     key = llm_log.cache_key(payload)
 
     if replay_enabled():
@@ -788,6 +1003,18 @@ def chat_stream(messages, cfg, json_mode=False, purpose="chat", on_reasoning=Non
                 continue
             pieces.append(piece)
             yield piece
+    except LLMCancelled:
+        # 用户停止：同样留一条档（ok=False），把已经收到的部分存下来。
+        # 为什么值得记：排查"这一轮花了多少钱/思考到哪一步"时，
+        # 被用户停掉的调用和"真断流"必须能区分开 —— 否则留档里只有一堆 ok=False，
+        # 看不出哪些是网络问题、哪些是有人按了按钮。
+        llm_log.record(purpose=purpose, model=cfg["model"], base_url=cfg["base_url"],
+                       key=key, ok=False, seconds=time.time() - t0,
+                       error="用户已停止生成（cancelled）",
+                       reply="".join(pieces), messages=messages, json_mode=json_mode,
+                       streamed=True, finish_reason=str(seen.get("finish_reason") or ""),
+                       max_tokens=cfg.get("max_tokens") or 0)
+        raise
     except LLMError as e:
         # 断流时把**已经收到的正文**一起落盘：否则"它到底写到哪一步了"只能靠猜，
         # 而半份 JSON 恰恰是判断"是语法写错还是被掐断"的关键（HANDOFF §8.35）。
@@ -2035,9 +2262,27 @@ def generate_storyboard(problem, cfg, registry, max_attempts=4,
     )
 
 
+def _user_content_with_images(problem, past, images):
+    """
+    本轮 user 的 content：无图时是**纯字符串**，有图时是"图在前、文在后"的数组。
+
+    单独抽一个函数是为了让"有没有图"这个分支只出现一次 —— 写成像
+    `build_user_prompt_multi(...) if not images else [...]` 那样内联的话，
+    将来加第二条带图路径（比如 regenerate_scene 也要读图）必然漏改一处。
+
+    ⚠️ 无图必须返回**字符串**：纯文本模型收到数组形态的 content 会直接 400，
+       而且这保证了老路径的请求体逐字节不变（见 stream_storyboard 的说明）。
+    """
+    if not images:
+        return build_user_prompt_multi(problem, past)
+    from . import vision
+    text = vision.user_text_with_image_note(problem, images)
+    return vision.to_content(text, images)
+
+
 def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
                       extra_rules="", on_delta=None, on_thinking=None,
-                      history=None, verbose=True):
+                      history=None, verbose=True, images=None):
     """
     generate_storyboard() 的**流式**版本：语义、返回值、重试策略完全一致，
     唯一区别是第一轮走 SSE，把 `brief` 的字符边到边通过 on_delta 回调吐出去。
@@ -2056,6 +2301,13 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
         history: 该会话之前的对话（同 generate_storyboard 的 history）。
             **多轮追问（"生成对应视频"、'换个讲法'、'第 2 镜讲慢点'）靠的就是它** ——
             里面带着模型历次输出的分镜 JSON（见 `_history_with_storyboards`）。
+        images: 已规范化的题目图片（`storyboard/vision.py::normalize_many` 的产物，
+            每项含 `data_url`）。**空/None 时行为与以前完全一致** ——
+            这是"图片输入"唯一的接入口，占位在 messages 的构造处。
+
+            ⚠️ 为什么参数放在最后（而不是挨着 problem）：这样所有**老调用方**
+               一个字都不用改，新调用方按关键字传即可 —— 加在中间会让位置参数
+               悄悄错位，而错位是静默的（比如 history 被当成 images）。
         verbose: 与 generate_storyboard 一致，打印每轮耗时/错误
 
     Returns:
@@ -2064,10 +2316,13 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
     # 先把"带 meta.storyboard 的记录"还原成"brief + 分镜 JSON"的历史消息，
     # 再按 token 预算裁剪 —— 顺序不能反：裁剪要看的是**真正会发出去的长度**。
     past = trim_history(_history_with_storyboards(history))
+    # ★ 带图时：文字里补一句"这是题目图、该怎么用"，content 换成数组形态（图在前）。
+    #   不带图时 to_content() 返回**纯字符串**，messages 与以前逐字节相同 ——
+    #   这也是让 LLM 留档指纹保持稳定的前提（无图请求的缓存键不该因为支持图片而变）。
     messages = [
         {"role": "system", "content": build_system_prompt(extra_rules)},
         *past,
-        {"role": "user", "content": build_user_prompt_multi(problem, past)},
+        {"role": "user", "content": _user_content_with_images(problem, past, images)},
     ]
     attempts_log = []
     last_err = None
@@ -2088,15 +2343,28 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
         if use_stream:
             pieces = []
             tap = BriefTap()
-            # 思考流只在第一轮转发：重试轮是"带着错误重新生成"，
-            # 用户已经看过一轮思考了，再刷一遍只是噪音。
-            thinking = on_thinking if attempt == 1 else None
+            # ★ 思考流**每一轮都转发**（原先只有第一轮）。
+            #
+            # 为什么改（这是一个实测到的问题）：重试轮要跑十几秒到几分钟，
+            # 而思考流是这期间**唯一在动的东西**。原先重试轮不转发它，界面就
+            # 完全静止 —— 用户看到"思考停在 2 万多字"然后半天没反应，
+            # 以为程序卡死了（真实反馈："思考到几万字然后就卡住了，过了半天
+            # 大纲突然就有了"）。代价是同一个气泡里会接上第二轮思考，
+            # 但那远好过一段几分钟的静默。
+            thinking = on_thinking
             try:
                 for piece in chat_stream(messages, cfg, json_mode=jm,
                                          purpose="storyboard",
                                          on_reasoning=thinking, seen=meta):
                     pieces.append(piece)
-                    if on_delta:
+                    # ⚠️ 但**正文只吐第一轮**：重试轮是"带着错误重新生成"，
+                    #    brief 会重新写一遍。上一轮的错字还挂在屏幕上，
+                    #    再吐一遍就成了同一段话出现两次（用户要的是"尽快看到
+                    #    第一版答案"，不是"看三次"）。
+                    #    所以"要不要流式"与"要不要把正文推给用户"是两件事，
+                    #    原先把它们绑在一起（重试就不流式），代价是连进度信号
+                    #    一起丢了。
+                    if on_delta and attempt == 1:
                         visible = tap.feed(piece)
                         if visible:
                             emitted = True
@@ -2116,6 +2384,10 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
                     raise
                 if verbose:
                     print(f"      [LLM] 流式不可用（{e}），退回非流式")
+                # ⚠️ 这里是**唯一**还应该关掉流式流的地方：连一个字节都没收到，
+                #    说明这个网关/模型根本不支持 `stream: true`，再试也是白等。
+                #    （与之相对，下面那 4 条"回灌重试"路径**不再**关流式 ——
+                #     那里流式明明是好用的，关掉只会让界面失去所有进度信号。）
                 use_stream = False
                 text = chat(messages, cfg, json_mode=jm, purpose="storyboard",
                             seen=meta)
@@ -2132,7 +2404,10 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
                 print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
                       f"→ 输出被截断（思考吃光了预算），回灌重试")
             last_err = LLMError("输出被 max_tokens 截断（finish_reason=length）")
-            use_stream = False
+            # ⚠️ 这里**不再**降级成非流式（原先写的是 use_stream = False）。
+            #    重试要跑十几秒到几分钟，非流式**没有任何进度事件** ——
+            #    界面会完全静止，用户以为卡死了（真实反馈见上面 thinking 那段注释）。
+            #    正文不会重复：上面已按 `attempt == 1` 把"推正文"与"要不要流式"解耦。
             messages.append({"role": "assistant", "content": _echo_back(text)})
             messages.append({"role": "user", "content": _FEEDBACK_TRUNCATED})
             continue
@@ -2147,7 +2422,7 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
                 print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
                       f"→ JSON 解析失败，回灌错误重试")
             last_err = e
-            use_stream = False
+            # 保持流式：重试轮的耗时同样以分钟计，非流式会让界面完全静止（见上面注释）
             messages.append({"role": "assistant", "content": _echo_back(text)})
             messages.append({"role": "user",
                              "content": _FEEDBACK_JSON.format(err=str(e)[:_JSON_ERR_LIMIT])})
@@ -2161,7 +2436,7 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
                 print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
                       f"→ brief 为空，回灌重试")
             last_err = LLMError("brief 缺失或为空")
-            use_stream = False
+            # 保持流式（同上）
             messages.append({"role": "assistant",
                              "content": _echo_back(json.dumps(raw, ensure_ascii=False))})
             messages.append({"role": "user", "content": _FEEDBACK_BRIEF})
@@ -2178,7 +2453,7 @@ def stream_storyboard(problem, cfg, registry, max_attempts=4, json_mode=None,
                 print(f"      [LLM {attempt}/{max_attempts}] {dt:.1f}s "
                       f"→ 校验失败，回灌错误重试：{e}")
             last_err = e
-            use_stream = False
+            # 保持流式（同上）
             messages.append({"role": "assistant",
                              "content": _echo_back(json.dumps(raw, ensure_ascii=False))})
             messages.append({"role": "user",

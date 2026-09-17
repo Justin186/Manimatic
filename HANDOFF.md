@@ -4,6 +4,10 @@
 > 读完这份，应当能立刻知道「什么已经能用、还剩什么、坑在哪」。
 > 前置阅读：`PROJECT_KNOWLEDGE.md`（项目知识库）、`docs/` 下三份设计文档。
 >
+> **📌 2026-09-17 会话：**「图片输入并进 core + 停止按钮修复 + 模型配置收口」的
+> **完整交接**在 `docs/本次会话交接-图片输入与取消修复.md`（含能力清单、变更文件
+> 清单、待办、验证记录）。本篇 §8.67–§8.71 是那五件事的**详细复盘**。
+>
 > **2026-09-12 更新**：HTTP + SSE 服务层（`api/`）已完成并实机联调通过 ——
 > 前后端现在能真的连起来跑。见 §2.3。
 >
@@ -4208,4 +4212,382 @@ self.lines.append(f"        {_V}{a} = {vb}")     # ⚠️ 新增：生成 `_e_tb
 
 **验证**：`tests/` **174 passed**（+1 哨兵）；六个探针确认新示例与两条规则都进了
 `build_system_prompt()`，且"什么是直角三角形"字样已从提示词中清干净。
+
+### 8.67 「停止」按钮停不掉模型：Canceller 只登记了子进程
+
+**用户反馈**："现在停止按钮并没有真停止模型思考。"
+
+这是 §8 这一整节的主题的又一次复发：**按钮变灰了、界面表现得像停了，但活儿还在干**
+（模型继续吐 token、继续计费），而且不报任何错。
+
+#### 根因：取消令牌手上没有"能打断 LLM 的东西"
+
+`api/pipeline.py::Canceller` 原本只登记**渲染子进程**（`_procs`，靠 `proc.kill()` 中断）。
+而 LLM 调用是完全另一条路径：
+
+```python
+for raw in resp:          # storyboard/llm.py::_iter_sse_stream
+```
+
+它阻塞在读一条 HTTP 流上，**`_procs` 里没有任何东西属于它**。所以点停止后：
+
+1. 浏览器连接断开 → `pipeline.stream()` 的 `finally` 确实调了 `cancel.cancel()`；
+2. 但既没有进程可 kill、也没有连接可关 → 工作线程继续阻塞在 read 上；
+3. 模型继续输出、继续计费；`push()` 因事件循环已关而**静默丢弃**（`RuntimeError` 被吞）；
+4. 最后还会把整份结果落盘。
+
+**用户以为停了，账单和 CPU 都不同意。**
+
+#### 修法：给取消令牌补上"可 close() 的资源"
+
+- `Canceller` 新增 `watch(obj)` / `unwatch(obj)`（`close()` 语义）与原有的
+  `register/unregister`（`kill()` 语义）并列，`cancel()` 两者都做。
+- `storyboard/llm.py` 新增 `LLMCancelled` + 一个 **ContextVar 取消令牌**
+  （`set_cancel_token` / `check_cancelled`）。`_http_post_json_stream` 与
+  `_http_post_json`（非流式，重试轮走它）都把 `resp` 交给令牌 `watch`，
+  读取循环每轮 `check_cancelled()`。
+- `pipeline.stream()` 在**工作线程体内**设置令牌。
+
+⚠️ **必须在线程体内部 set**：ContextVar 不会自动进入新线程。在外面设完再起线程，
+线程里 `get()` 拿到的是 `None`，于是 `check_cancelled()` 永不触发 ——
+**"停止"又静默失效，且不报错不打日志**，正是修 bug 时最容易踩空的一步。
+
+#### ⚠️ `LLMCancelled` **故意不继承 `LLMError`**
+
+这是整个改动里最关键的一个决定。`chat_stream` / `stream_storyboard` / 路由里
+到处都是 `except LLMError`，而那些分支的语义是"这次失败，换个方式再来一遍" —— 尤其
+`stream_storyboard` 有一条"流式不可用 → 退回非流式重试"的降级。取消若被当成
+`LLMError`，用户按"停止"会换来**立刻再发一次完整的 LLM 请求**：等更久、花更多钱，
+比不修还糟。不继承它，事件才会穿过所有那些 except，落到 `pipeline` 被单独接住
+（那里打一行"客户端停止"、不发 error 事件、不重试）。
+
+#### ⚠️ 取消时抛的不是 `OSError`，是 `AttributeError`（第一次改就栽在这）
+
+第一版把异常处理写成 `except (OSError, http.client.HTTPException)`，测试**没通过**，
+服务端日志里是：
+
+```
+AttributeError: 'NoneType' object has no attribute 'peek'
+  File "http\client.py", line 764, in _peek_chunked
+```
+
+原因：`close()` 会把 `resp.fp` 置成 `None`，而读线程正阻塞在 `fp.peek()` 上 ——
+两者并发操作同一个 `http.client` 对象。所以取消引发的异常类型**不一定是 OSError**。
+
+正确顺序是：**先问令牌"是不是被取消了"，再决定怎么包装异常** ——
+取消 → `check_cancelled()` 抛 `LLMCancelled`；没取消 → 才按真断流包成 `LLMError`。
+（`AttributeError` 也一并按"断流"处理：那个竞态的**非取消**版本症状与断流一致，
+报「连接中断」比报「NoneType has no attribute peek」有用得多。）
+
+#### 顺带修掉：`/api/storyboard/replace-scene` 阻塞事件循环
+
+这一条是查上面的问题时发现的**另一个 bug**：该路由的 `llm.regenerate_scene()`
+原先**直接在事件循环里同步调用**，没走 `pipeline.stream`。后果有两个：
+
+- 收不到取消令牌 → 用户点停止完全无效（同一个 bug 的另一处）；
+- **整个服务在那十几秒（实测 98.4s）里是"哑"的** —— 连 `/api/health` 都排不上队。
+
+已改为包进 `pipeline.stream`（`run()` 在工作线程执行、结果用单槽 dict 带出）。
+实测修复后：`replace-scene` 进行中 `/api/health` **0.03s** 返回。
+
+#### 验证
+
+| # | 验证项 | 结果 |
+|---|---|---|
+| 1 | 断开连接后，留档新增一条 `error="用户已停止生成（cancelled）"` | ✅ |
+| 2 | 服务端日志打出 `[api] 客户端停止，已中断模型调用`，且**无 traceback** | ✅ |
+| 3 | 断开后留档计数**停止增长**（没有把那一轮跑完） | ✅ |
+| 4 | 取消后服务仍健康（`/api/health` 0.07s） | ✅ |
+| 5 | `/api/chat`、`/api/vi/chat` 不取消时正常跑完（回归） | ✅ |
+| 6 | `replace-scene` 正常交付（`tool_result` ×1，回归） | ✅ |
+| 7 | `tests/` | **174 passed** |
+
+> 判据专门绕开了一个误区：不能用"留档里有没有 cancelled"当唯一判据 ——
+> 取消可能恰好发生在一轮刚正常结束、还没进下一轮的时刻（那时没有 cancelled 记录，
+> 但确实停了）。**"断开后不再产生新记录"才是"停止生效"的可靠判据。**
+
+### 8.68 图片输入从"插件"改成 core（以及为什么"插件形式"在这里是错的）
+
+**背景**：图片输入（拍照/截图题目）最初是作为**旁路插件**引入的
+（`plugins/vision_input/`，独立端点 `/api/vi/chat`，靠换一条 uvicorn 启动命令启用）。
+`plugins/` 目录现已**整体删除**，图片输入并入 core。
+
+#### 为什么放弃插件形式
+
+插件那套声明的价值是"**`api/` 与 `storyboard/` 一个字节都不改**，删掉 `plugins/`
+主程序毫发无伤"。但接入的当天这条就破了：
+
+1. **复刻必然漂移，而且已经漂了。** 插件的 `generate.py` 是 `stream_storyboard()`
+   那套「生成 → 校验 → 回灌重试」的**完整复刻**（约 200 行）。搬过来时和 core 比出
+   3 处分歧：硬编码 `temperature=0.2`（会让设置页改的温度静默失效）、漏了
+   `meta.storyboard`（多轮"改这一版"会丢上一版画面）、漏了 `diff_scenes` 对账。
+   插件自己的注释就写着"复刻的代价是**流程会漂移**（上游改了重试策略，这里不知道）"
+   —— 这不是意外，是这个结构的必然后果，而且漂移是静默的。
+
+2. **横切能力天然属于 core。** §8.67 那个"停止按钮停不掉模型"的修复，必须同时改
+   `llm.py`（取消令牌）和 `pipeline.py`（Canceller 加 `watch`）—— 插件**无法**自己
+   修好这件事。这类能力一出现，插件边界就被穿透了。
+
+3. **"可选的后端模式"没带来选择价值。** 图片输入是核心能力（拍照搜题是最自然的
+   使用方式），代价却是"要开图片就换一个启动脚本"。实测踩过一次：8000 上跑的是旧
+   target，`/api/vi/health` 直接 404，而且**不报任何错**。
+
+> 插件形式确实是**对的**，但只对那类"实验性 / 高危 / 随时可能删"的功能
+> （如 planner_worker 已实测证伪、remote_access 默认关）。判据一句话：
+> **"这个功能是否要常驻、是否要被别人 import"决定它该在哪。**
+
+#### 改法（净减代码）
+
+| 动作 | 内容 |
+|---|---|
+| **新增** | `storyboard/vision.py` —— 合并原插件的 `config.py` / `images.py` / `vision.py` / `messages.py`（图片解码·降采样·透明底合成·EXIF 转正 + 能力闸口 + 多模态 content 构造 + 图片摘要） |
+| **删掉** | `plugins/vision_input/generate.py`（那 200 行复刻，**漂移源**）、`messages.py`、`router.py`、`install.py`、`serve.py`、`config.py`、`vision.py`、`images.py` |
+| **改 `llm.py`** | `stream_storyboard()` 加 `images=None` 参数（放在**参数表末尾**，老调用方一个字不用改），新增 `_user_content_with_images()` 承载"有图/无图"的唯一分支 |
+| **改 `api/routes/chat.py`** | `ChatRequest` 加可选 `images` 字段；`run()` 里加"配置 → 能力闸口 → 规范化"三段（**都在落盘之前**）；调用点传 `images`；落盘 meta 记图片摘要 |
+| **删除** | `MathStoryboard/plugins/` 整个目录；`run_api.bat` 的 target 改回 `api.main:app` |
+| **前端** | `streamChat` 不再按图切端点（统一打 `/api/chat`）；删 `src/app/api/vi/chat/route.ts`，Mock 的 `/api/chat` 支持 `images` |
+
+`images` 为空时 `to_content()` 返回**纯字符串**，请求体与此前**逐字节相同** ——
+这是让 LLM 留档指纹（`llm_log.cache_key`）不因支持图片而失效的前提。
+
+#### 顺带修正一处文档与代码不符
+
+`MSB_VI_ALLOW_URL` 的默认值：原代码是 `True`，而文档写的是默认关。URL 取图会让
+服务端按用户给的地址发请求（SSRF 面），**已按文档改成默认 `False`**。
+
+#### 验证
+
+| # | 验证项 | 结果 |
+|---|---|---|
+| 1 | `/api/vi/health` | 404（端点已移除） |
+| 2 | `/api/chat` 带图生成、只传图不写字 | ✅ 事件契约 `text_delta* → plan → done` 完整 |
+| 3 | 真实读图：写着 `x²−5x+6=0` 的图 | ✅ 模型正确读出并因式分解，两根 x=2 / x=3 |
+| 4 | 会话落盘**不含** `data:image` / `base64` | ✅ |
+| 5 | 四条拒绝路径（超限/非图片/URL 关闭/无图无字） | ✅ 均给出可操作的中文提示 |
+| 6 | 无图路径回归 | ✅ |
+| 7 | 停止按钮（§8.67）在合并后仍生效 | ✅ 留档 `cancelled`、断开后计数停止增长 |
+| 8 | `tests/` | **174 passed** |
+| 9 | 前端 `tsc` / `eslint` / **`next build`** | 全部通过（8 个页面 + 4 个 mock 路由） |
+
+### 8.69 「思考到几万字就卡住，过半天大纲突然出现」—— 回灌重试静默降级成非流式
+
+**用户反馈**："深度思考思考到几万字（现象不固定，有的 2 万有的 3 万）然后就卡住了，
+过了半天后分镜大纲突然就有了。我可以肯定卡住的时候并没思考完。"
+
+日志那行是关键物证：
+
+```
+[api] chat topic='' imgs=1 -> 4 分镜 intent=propose attempts=4 streamed=True 旧版=无 思考=22849字 正文=265字
+```
+
+`attempts=4` —— 这次生成**跑满了 4 轮**（1 次首轮 + 3 次回灌重试）。
+
+#### 根因：重试轮被降级成非流式，而**非流式没有任何进度事件**
+
+`stream_storyboard()` 里，每一条"回灌重试"路径后面都跟着一句
+`use_stream = False`（共 4 处：截断 / JSON 解析失败 / brief 为空 / 校验失败）。
+含义是"下一轮不用流式，改用普通 POST 重来"。
+
+后果是致命的，但**不报任何错**：
+
+```
+第 1 轮  流式 → 思考流一路推给前端（界面在动，用户看到"思考 2 万字"）
+    ↓ 校验失败（或解析失败）
+第 2~4 轮 非流式 → 一个事件都没有（界面完全静止，几分钟）
+    ↓ 好不容易通过校验
+界面才突然出现大纲
+```
+
+用户的描述（"思考到几万字 → 卡住 → 过了半天大纲突然出现"）**逐字对应**这个流程。
+留档里也能看到形态：`streamed=True` 之后紧接着几条 `streamed=False`。
+
+> 让这个 bug 特别难认的一点：日志里 `streamed=True` 是**首轮**的值，
+> 它看起来像是"全程都流式了"，于是排查方向被带到"上游卡住了"上。
+> 真正发生的是**我们自己关掉了流式**。
+
+#### 修法：把"要不要流式"与"要不要把正文推给用户"解耦
+
+这两件事原先被绑在一起（"重试 → 非流式"），但它们的诉求完全不同：
+
+| 诉求 | 结论 |
+|---|---|
+| 重试期间**要有进度信号** | 必须保持流式 —— 思考流是那几分钟里唯一在动的东西 |
+| 重试期间**不要再吐正文** | 必须不吐 —— brief 会重写一遍，上一轮的错字还挂在屏幕上，再吐一次就是同一段话出现两次 |
+
+所以：
+- 4 处回灌重试**不再** `use_stream = False`；
+- `on_reasoning` 从"只有第一轮转发"改成**每轮都转发**；
+- `on_delta`（正文）收紧成**只有第一轮**推送（`attempt == 1`）。
+
+`use_stream = False` 只保留在**唯一该保留的地方**：连一个字节都没收到的
+"流式真的不可用"降级（网关不支持 `stream: true`）—— 那里再试也是白等。
+
+#### 顺带查清的两件事（都是实测，不是猜）
+
+1. **这个中转站的思考关不掉。** 对照实测：
+   `reasoning_effort=low` → 无效（思考 265 字，比基线还多）；
+   `thinking={"type":"disabled"}` → 无效；`enable_thinking=false` → 无效；
+   `reasoning_effort=minimal` → 直接 400。
+   所以"收紧思考"这条路**走不通**，"调大 max_tokens"也只是买回"更晚才失败"。
+
+2. **正文为空不一定是"上游挂住"。** 另有一条失败是
+   `completion_tokens=5552 / reasoning_tokens=5552 / 正文 0 字 / finish_reason=stop`
+   —— 思考**正好吃满**、上游还报"正常结束"。它是"思考把预算烧穿"的标准形态，
+   但**不是**"连接被挂住"：实测用 `max_tokens=18000` 故意逼它撞上限时，
+   上游会老老实实回 `finish_reason=length`（76.7s，不挂）。
+
+#### 验证
+
+用**假网关**做确定性验证（真实中转站的回灌是随机触发的，靠运气测不到）：
+首轮返回坏 JSON 触发回灌重试，两轮都发思考流。
+
+| 判据 | 修复前 | 修复后 |
+|---|---|---|
+| 第 2 轮（重试轮）的思考是否推给前端 | ❌ 无（非流式） | ✅ 有 |
+| 正文是否只推一次 | — | ✅ 只推首轮 |
+| `tests/` | — | **174 passed** |
+
+真实链路复测（`:8019`）：83.8s，`thinking_delta` 共 **16701 个事件**，
+`attempts=1 streamed=True`，全程**无 >8s 静默**（唯一一个 10.6s 间隔在 `plan` 之后，
+即生成已结束的正常收尾）。
+
+### 8.70 图片功能被自己的黑名单关掉了：`deepseek-chat` 其实能读图
+
+**用户反馈**：切到 `direct` 档（`deepseek-chat`）后传图，被拒绝并提示
+"当前模型 `deepseek-chat` 不支持图片输入"，用户的原话是**"怎么可能，应该能读的啊"**。
+
+**用户是对的，闸口错了。**
+
+#### 根因：一个"凭印象"的黑名单条目，把功能关掉了
+
+`storyboard/vision.py` 的 `_TEXT_ONLY_MARKERS` 里写着：
+
+```python
+# DeepSeek 的对话/推理模型（视觉是单独的 VL 系列，不在这里）
+"deepseek-chat", "deepseek-coder", "deepseek-reasoner", "deepseek-r1",
+```
+
+依据是"DeepSeek 对话/推理模型没有视觉能力"。**但这是过时的印象，不是事实。**
+
+实测（**绕过 `ensure_can_read_images()` 直接发多模态请求**）：
+
+| 模型 | 实测结果 |
+|---|---|
+| `deepseek-chat` | ✅ **能读** —— 0.8s 准确读出图里的 `x^2 - 5x + 6 = 0` |
+| `deepseek-flash` | ✅ **能读** —— 1.2s 准确读出 |
+| `deepseek-v4-pro` | ❌ 不能读，但模型**自己说明**了："无法识别图片内容" |
+
+于是结论反转：**不是模型不支持，是我们凭一个过时的印象把自己能用的功能拦掉了。**
+
+#### 修法：把判据从"模型行不行"改成"接口报错可不可读"
+
+这次的教训不是"改黑名单内容"，而是**判据本身错了**。想清楚之后是这样的：
+
+```
+误拒（能读却拦下）→ 用户彻底失去功能，还收到一句误导性提示  ← 本次踩的
+误放（不能读却放行）→ 多花一次往返，拿到一句（通常可读的）报错
+```
+
+**误拒的代价远大于误放。** 再往下推一层，闸口真正该拦的是"接口报错**看不懂**"那种
+（老式纯文本模型回 `400 messages[0].content must be a string`，用户完全摸不着头脑）；
+而 `deepseek-v4-pro` 失败时接口自己说得清清楚楚 —— 这种情况闸口**没有增益**。
+
+所以最终形态：
+
+1. `_VERIFIED_VISION` —— **实测能读图**的型号白名单，**优先级最高**，压过所有猜测。
+   （这是唯一基于事实的一层，不该在下一次整理黑名单时又被猜进去。）
+2. 名字带视觉特征（`-vl` / `vision` / `gpt-4o` …）→ 放行。
+3. 黑名单只留**未实测的保守条目**（llama / mistral 那一代），且注明"不代表确定不支持"。
+4. **拿不准一律放行**，让接口去说话。
+
+#### 过程中的一个自我修正（值得记）
+
+第一次改的时候，我把 `_TEXT_ONLY_MARKERS` 里**同一批**的 `llama-3` / `llama2`
+**一起删掉了** —— 那是回归：`llama-3-70b` 立刻被放行。闸口回归脚本（15 个型号）
+当场抓到了它。
+
+**教训**：清理名单时，"实测证伪的那几条"和"同一批里没实测过的"是**两件事**，
+不能因为写在一起就一起删。所以那条注释现在专门写了这句警告。
+
+#### 验证
+
+| 项 | 结果 |
+|---|---|
+| 闸口回归（15 个型号，含 3 个证伪点与 4 个易误伤点） | ✅ 全部符合预期 |
+| 端到端：`direct` 档 + **不设** `MSB_VI_PROFILE`，走正常闸口传图 | ✅ 0.6s 读出 `2x + 3 = 11` |
+| `tests/` | **174 passed** |
+
+`run_api.bat` 里的 `MSB_VI_PROFILE=relay` 也已去掉（不再需要）。
+
+> **验证某个型号能不能读图的标准做法**（下次不用猜）：
+> 绕过 `vision.ensure_can_read_images()`，直接构造
+> `content=[{"type":"image_url",...},{"type":"text",...}]` 发一次请求，
+> 看模型能不能读出图里的字。成本几十个 token。
+
+### 8.71 `deepseek-chat` 是遗留别名：改用真名 `deepseek-flash` + 显式关思考
+
+**起因**：用户问"为什么 direct 档写的是 `deepseek-chat`，不应该是 `deepseek-flash` 吗"。
+这个疑问指向了一处**长期存在的隐性依赖**。
+
+#### 查到的事实
+
+| 探测 | 结果 |
+|---|---|
+| `GET /models` | 只列 **`deepseek-flash`** 和 `deepseek-v4-pro` |
+| 请求 `model=deepseek-chat` | ✅ 接受，但**响应回显 `model=deepseek-flash`** |
+| 请求 `model=deepseek-chat-x` | ❌ 400，报错原文：`The supported API model names are deepseek-flash, deepseek-v4-pro` |
+
+**结论：`deepseek-chat` 是官方为兼容旧代码保留的遗留别名，实际路由到 `deepseek-flash`。**
+
+#### ⚠️ 关键差异：别名**隐含关掉了思考**
+
+这是"只改名字"会踩的坑（同一 prompt、`max_tokens` 给足）：
+
+| 请求 `model` | 回显 | reasoning_tokens | 耗时 |
+|---|---|---|---|
+| `deepseek-chat`（别名） | `deepseek-flash` | **None** | 0.59s |
+| `deepseek-flash`（真名） | `deepseek-flash` | **51** | 0.87s |
+| `deepseek-flash` + `thinking:{type:disabled}` | `deepseek-flash` | **None** | 0.61s |
+
+也就是说**别名把"关思考"这个行为一并继承了**。直接换真名会让模型开始思考，
+而这一档的定位恰恰是"快、无思考、拿来调 prompt"（思考起来就毁掉了它的价值）。
+
+#### 修法：新增 `extra_body` 透传槽位
+
+"关思考"这类参数**不是 OpenAI 标准**，各厂商名字还都不一样
+（DeepSeek 官方 `{"thinking":{"type":"disabled"}}`、别家 `enable_thinking` /
+`reasoning_effort` …）。在代码里硬编码任何一家都会误导下一家适配。
+
+所以给 `llm.py` 加了一个透传槽位 `extra_body`（配置里的 dict 原样并进请求体）。
+**三处必须同时改，漏一处就是静默失效**：
+
+1. `cfg` 默认值里要有 `"extra_body": {}`；
+2. `_merge_cfg()` 要**显式处理 dict**（和 `headers` 同理）——
+   下面那行 `if k in cfg` 只放行**已有键**，而 `extra_body` 的子键
+   （`thinking` / `reasoning_effort`）都不在 cfg 里，不写这段配置里写了也读不进来；
+3. `_merge_extra_body()` 用 **`setdefault`**（不覆盖标准字段），
+   且必须在 `llm_log.cache_key()` **之前**调用 —— 否则"改了思考开关"会命中旧留档指纹。
+
+启动横幅也加了 `LLM 私有 : {...}` 一行：`extra_body` 现在承载"关思考"这类开关，
+而"模型为什么在思考/为什么不吐正文"正是最难靠猜判断的事（§8.69 那几个坑都在这一带）。
+
+#### 实测过的关思考写法（省得下次再试）
+
+| 写法 | 结果 |
+|---|---|
+| `{"thinking": {"type": "disabled"}}` | ✅ 有效 |
+| `{"reasoning_effort": "none"}` | ✅ 有效 |
+| `{"enable_thinking": false}` | ❌ 无效（照样思考） |
+| `{"thinking": false}` | ❌ 400（要的是对象，不是布尔） |
+
+#### 验证
+
+| 项 | 结果 |
+|---|---|
+| 配置解析出 `extra_body`（没被静默过滤） | ✅ |
+| 真名 + 关思考：`reasoning=None`、0.89s，与旧别名等价 | ✅ |
+| 真名**不**关思考：`reasoning=77`（证明开关真在起作用） | ✅ |
+| 端到端：读图 + 分镜生成 | ✅ **6.6s / attempts=1 / 4 个分镜**，正确解出两根 |
+| 实测留档（新配置） | `deepseek-flash \| 6.6s \| completion=2081 \| reasoning=None` |
+| `tests/` | **174 passed** |
 
