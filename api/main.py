@@ -32,6 +32,7 @@ from fastapi.staticfiles import StaticFiles
 from storyboard import latex_env
 
 from . import __version__, auth, config, jobs, store
+from .routes import cancel as cancel_routes
 from .routes import chat as chat_routes
 from .routes import render as render_routes
 from .routes import settings as settings_routes
@@ -73,6 +74,7 @@ app.add_middleware(
 )
 
 app.include_router(chat_routes.router, prefix="/api", tags=["chat"])
+app.include_router(cancel_routes.router, prefix="/api", tags=["cancel"])
 app.include_router(render_routes.router, prefix="/api", tags=["render"])
 app.include_router(storyboard_routes.router, prefix="/api", tags=["storyboard"])
 app.include_router(settings_routes.router, prefix="/api", tags=["settings"])

@@ -165,6 +165,27 @@ SAFE_NAMES = {
     "pi", "e", "tau", "inf",
 }
 
+# ------------------------------------------------------------------------------
+# 「pdflatex 认不出的字符」——`formula()` 该不该改走 ctex(xelatex) 的判据
+# ------------------------------------------------------------------------------
+# ⚠️ 2026-09-18 修（用户截图：公式里 ① 那类字符会把**整个分镜**渲不出来）：
+#   原来 `formula()` 只用 `_has_cjk` 分流，于是 `{"kind":"formula","content":"① ..."}`
+#   走 MathTex(pdflatex)，直接 `Unicode character ① (U+2460) not set up for use with
+#   LaTeX` —— 一个字符毁掉一镜。同一个 ① 在正文里是"白块"（见 `_FALLBACK_RANGES`）、
+#   在公式里是"崩"，两种坏法都是静默失败，这里统一收口。
+#
+# ⚠️ 正则与码点表都**定义在 `metrics.py`**（它不依赖 manim，谁都能 import）。
+#   必须只有一份：`tex_batch.py` 的预热分组读的是同一个 pattern，两边漂移 =
+#   预热按 A 算 hash、真渲染按 B 去查 → 缓存全落空且**静默**（只表现为"怎么又慢了"）。
+_FALLBACK_RANGES = metrics.FALLBACK_RANGES       # 字形回退表（注入进 helper）
+_FORMULA_TEX_PATTERN = metrics.FORMULA_TEX_PATTERN
+_FORMULA_TEX_RE = re.compile(_FORMULA_TEX_PATTERN)
+
+
+def needs_ctex(s) -> bool:
+    """这段公式是否必须走 ctex（xelatex）：含中文、或含 pdflatex 认不出的符号。"""
+    return bool(_FORMULA_TEX_RE.search(str(s)))
+
 
 # ==============================================================================
 # 运行时 helper：注入到生成的 .py 顶部
@@ -218,6 +239,19 @@ def _has_cjk(s):
     return bool(_CJK_RE.search(str(s)))
 
 
+# `formula()` 走 MathTex 还是 ctex 的分流判据。正则本体是**占位符**，
+# 由 `RUNTIME_HELPER` 末尾那次 replace 把 `_FORMULA_TEX_PATTERN` 的真实内容填进来
+# —— 于是它是模块层与生成代码共用的唯一一份，`tex_batch.py` 也读同一个常量。
+# ⚠️ 不能写成 `_re.compile(r"""%s""" % _FORMULA_TEX_PATTERN)`：这段代码是**字符串**，
+# 会被逐字注入生成文件，那里没有 `_FORMULA_TEX_PATTERN` 这个名字 → NameError。
+_FORMULA_TEX_RE = _re.compile(r"""__FORMULA_TEX_PATTERN__""")
+
+
+def _needs_ctex(s):
+    """公式串是否必须走 ctex（xelatex）：含中文、或含 pdflatex 认不出的符号。"""
+    return bool(_FORMULA_TEX_RE.search(str(s)))
+
+
 # ---- 中英混排：中文走 CN_FONT，数字/字母走 LATIN_FONT ------------------------
 #
 # 为什么必须显式切分，而不是只写 `font=CN_FONT` 让 Pango 自己 fallback：
@@ -229,6 +263,44 @@ def _has_cjk(s):
 # 后者的每段字高、基线各不相同，arrange 只能按外框对齐，中英混排会忽高忽低；
 # MarkupText 交给 Pango 排同一行，基线天然一致。
 _LATIN_RUN = _re.compile(r"([\\u3000-\\u303f\\u4e00-\\u9fff\\uff00-\\uffef]+)")
+
+# ------------------------------------------------------------------------------
+# 字形回退：Times New Roman **没有**这些字形，交给 CN_FONT 画
+# ------------------------------------------------------------------------------
+# ⚠️ 2026-09-18 修（用户截图：「① 加 0 还是它自己」前面两块白方块）：
+#   Pango 的规则是"当前 family 没有这个字形时才去找后备字体"，而 `_markup()` 把
+#   **所有非中文段**都显式指给了 LATIN_FONT —— 于是 Times New Roman 缺字形的字符
+#   不是去 fallback，而是画成 `.notdef`：一个带十六进制码点的空心方块。
+#   ①（U+2460）正是重灾区（截图里那个方块上印的就是 "2460"），而且**模型很爱写**
+#   ①②③ 当步骤编号（`examples/` 与提示词里到处都是）。
+# 为什么不用"把 LATIN_FONT 写成 `Times New Roman,STZhongsong` 回退列表"：
+#   Pango 支持逗号分隔的 family 列表（实测有效），但它对**中文字**也会生效 ——
+#   拉丁字形会从列表里第一个有该字形的字体取，等于把西文字体交给宋体决定，
+#   这正是 2026-09-16 那条"Text 的数字和字母都不是新罗马体"的成因。
+#   局部、显式地切字体才能既保住西文字体、又补上缺的字形。
+# 区间怎么来的：2026-09-18 用 GDI `GetGlyphIndicesW` 逐个码点比对
+#   「Times New Roman 缺 且 CN_FONT 有」得到的（只在中文语境真会用到的符号块里找）。
+#   ⚠️ 它依赖**本机字体版本**。换字体/换机器后必须重跑标定，
+#   `tests/test_glyph_fallback.py` 会拿真实渲染核对（越界即回归）。
+# ⚠️ 数据本体在 `metrics.FALLBACK_RANGES`（不依赖 manim，估算器也要用同一份）。
+#   下面是**占位符**，由文件末尾那次 replace 填进来 —— 不能直接写 `%s` 或 `{}`，
+#   这段是会被逐字注入生成代码的字符串（详见文件末尾 RUNTIME_HELPER 的替换处）。
+_FALLBACK_RANGES = __FALLBACK_RANGES__
+
+# 热路径缓存：`_markup()` 对**每一段文字**都要跑一遍，逐字符查元组是纯浪费。
+# 只有真出现回退字符时才建表（绝大多数文字一个都不命中，连这步都省了）。
+_FALLBACK_CHARS = None
+
+
+def _needs_cn_font(ch):
+    """这个字符是否必须交给 CN_FONT（Times 没字形）。"""
+    global _FALLBACK_CHARS
+    if _FALLBACK_CHARS is None:
+        _FALLBACK_CHARS = frozenset(
+            chr(cp) for a, b in _FALLBACK_RANGES for cp in range(a, b + 1))
+    return ch in _FALLBACK_CHARS
+
+
 _LATIN_FONT_OK = None
 
 
@@ -259,17 +331,38 @@ def _markup_escape(s):
 
 
 def _markup(s):
-    """把**非中文**的连续段包进 <span font_family="LATIN_FONT">。"""
+    """
+    把**非中文**的连续段包进 <span font_family="LATIN_FONT">；
+    其中 Times New Roman 缺字形的字符（见 `_FALLBACK_RANGES`）**不包**，
+    留给外层 `font=CN_FONT` 去画 —— 否则它们会变成带码点的 `.notdef` 白方块。
+    """
     latin = _has_latin_font()
     out = []
     for part in _LATIN_RUN.split(str(s)):
         if not part:
             continue
-        if latin and not _LATIN_RUN.fullmatch(part) and part.strip():
+        if not latin or _LATIN_RUN.fullmatch(part) or not part.strip():
+            out.append(_markup_escape(part))
+            continue
+        # 非中文段：按"是否需要回退"再切一次，只有该用西文字体的碎片才套 span。
+        # 先快速判断整段有没有回退字符 —— 绝大多数文字一个都没有，直接整段包走。
+        if not any(_needs_cn_font(c) for c in part):
             out.append('<span font_family="%s">%s</span>'
                        % (LATIN_FONT, _markup_escape(part)))
-        else:
-            out.append(_markup_escape(part))
+            continue
+        buf = []
+        for ch in part:
+            if _needs_cn_font(ch):
+                if buf:
+                    out.append('<span font_family="%s">%s</span>'
+                               % (LATIN_FONT, _markup_escape("".join(buf))))
+                    buf = []
+                out.append(_markup_escape(ch))
+            else:
+                buf.append(ch)
+        if buf:
+            out.append('<span font_family="%s">%s</span>'
+                       % (LATIN_FONT, _markup_escape("".join(buf))))
     return "".join(out)
 
 
@@ -333,18 +426,20 @@ def _set_number(m, value):
 def formula(s, **kw):
     """
     公式渲染三级分流：
-      1. 无 LaTeX 环境  → Text 兜底（保证不崩）
-      2. 纯 LaTeX       → MathTex（快）
-      3. 含中文         → Tex + ctex 模板（xelatex），公式里可直接嵌中文
+      1. 无 LaTeX 环境          → Text 兜底（保证不崩）
+      2. 纯 LaTeX（pdflatex 认得的） → MathTex（快）
+      3. 含中文 / pdflatex 认不出的符号 → Tex + ctex 模板（xelatex）
 
     ⚠️ 2026-09-17：模板一律带上 xcolor（+ 项目调色板的 \\definecolor），
     这样公式里可以写 `{\\color{ACCENT}\\Delta x}` 给**个别符号**单独上色
     （元素上要同时写 "tex_colors": true，见 §8.49）。
+    ⚠️ 2026-09-18：第 2/3 档的判据由 `_has_cjk` 换成 `_needs_ctex` —— 只认中文的话，
+    `①` 这类符号会被判给 pdflatex 然后**整镜渲不出来**（见 `_needs_ctex` 的注释）。
     """
     if not USE_LATEX:
         # 降级也不能把 LaTeX 源码糊在屏幕上：先清理成人能读的记号
         return _text(_plain_tex(s), **kw)
-    if not _has_cjk(s):
+    if not _needs_ctex(s):
         return MathTex(s, tex_template=_tex_template(), **kw)
     try:
         return Tex(f"${s}$", tex_template=_ctex_template(), **kw)
@@ -706,6 +801,17 @@ def _cell_box(tbl, rows, cols, color=RED, stroke_width=3.5, buff=0.04):
     return SurroundingRectangle(_cells(tbl, rows, cols), color=color,
                                 stroke_width=stroke_width, buff=buff)
 '''
+
+# 把两份**数据/判据**填进注入串（上面留的占位符）。
+# 这样"模块层 / 生成代码 / tex_batch 预热 / 版面估算器"读的都是 `metrics.py`
+# 里那唯一一份，不存在"改了一处忘了另一处"的漂移（本项目反复踩的失效模式）。
+# ⚠️ 用 replace 而不是 % / .format：helper 里有大量 `%s`、`{}`（生成代码本身），
+#    走格式化会被当成占位符解析 —— renderer.HEADER 那边也是为这个原因改用拼接的。
+RUNTIME_HELPER = (RUNTIME_HELPER
+                  .replace("__FORMULA_TEX_PATTERN__", _FORMULA_TEX_PATTERN)
+                  .replace("__FALLBACK_RANGES__", repr(metrics.FALLBACK_RANGES)))
+assert "__FORMULA_TEX_PATTERN__" not in RUNTIME_HELPER, "公式判据占位符没被替换掉（改名了？）"
+assert "__FALLBACK_RANGES__" not in RUNTIME_HELPER, "字形回退占位符没被替换掉（改名了？）"
 
 
 # ==============================================================================

@@ -50,10 +50,20 @@ from .config import load_config
 #   · /api/auth/    —— 登录/注册必须能匿名访问（它们自己管自己的安全）
 #   · /api/health   —— 环境自检，被拦会让"服务到底活着没有"也查不了
 #   · /api/share/   —— 分享本来就是公开的（且它只回标题与视频，不回对话）
+#   · /api/gallery  —— 画廊是作品墙，浏览是社区行为（只回标题/成片/分段，不回对话）。
+#                     发布与撤下是 **POST /api/threads/{id}/gallery**，不在这条前缀下，
+#                     仍走闸门 + 归属校验 —— 浏览公开、发布需证明"这是我的"。
+#
+# ⚠️ 这里必须是**不带尾斜杠**的 "/api/gallery"，不能写成 "/api/gallery/"：
+#    前两个前缀都带尾斜杠，是"前缀下的一切"这个语义；而画廊列表接口的路径
+#    就是 `/api/gallery` **本身**，`"/api/gallery".startswith("/api/gallery/")`
+#    为 False —— 漏了这个差别，症状是列表接口返回 401 而不是 403，
+#    排查时会一路往"鉴权是不是坏了"的方向找，而问题其实在一个字符串上。
 PUBLIC_PREFIXES = (
     "/api/auth/",
     "/api/health",
     "/api/share/",
+    "/api/gallery",
 )
 
 # 不拦的路径（非 /api，本来就不在保护范围，列出来只为让人一眼看清边界）

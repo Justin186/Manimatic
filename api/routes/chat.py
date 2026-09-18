@@ -15,6 +15,7 @@ brief 的字符最先到（1~2 秒），前端立刻有字可显示 —— 不�
 """
 
 import threading
+import time
 import uuid
 
 from fastapi import APIRouter
@@ -96,8 +97,16 @@ async def chat(req: ChatRequest):
     # 前端带了 id 就用它的 —— 两边共用同一个 id 是整条恢复链路的前提：
     # confirm 发的 message_id 必须和这里落盘的那个一模一样，否则算不出 task_name。
     mid = (req.message_id or "").strip() or ("m_" + uuid.uuid4().hex[:12])
+    # 同一条会话上**不许有两条对话生成并存**：两条流都会 append_thread_message，
+    # 而那是"读-改-写" —— 并发落盘会丢消息（与 jobs.py 给渲染加 name 锁同一个理由）。
+    # 前端本来也有这条不变量（web/src/lib/streams.ts），但那是靠"断连即取消"兜的；
+    # 现在断连不再等于取消（刷新/网络抖动都走断开），所以必须在这里显式重申一次。
+    pipeline.cancel_thread(req.thread_id, kind="chat")
     cancel = pipeline.new_cancel()
-    state = {"streamed": 0, "thinking": 0}
+    # thinking_text 攒推理原文（落盘用），thinking_* 记时间只为算"思考了多久"
+    # （前端折叠态显示"思考 N 秒"，刷新后不能拿 createdAt 去减 —— 那会算成几天）
+    state = {"streamed": 0, "thinking": 0, "thinking_text": [],
+             "thinking_first": None, "thinking_last": None, "thinking_end": None}
 
     def run(push):
         try:
@@ -131,6 +140,14 @@ async def chat(req: ChatRequest):
                 # 明确不支持就直接说清楚，而不是等接口回一个含糊的 400
                 vision.ensure_can_read_images(cfg, vcfg)
                 images, warns = vision.normalize_many(raw_images, vcfg)
+                # 图片落盘（**文件**，不进 messages JSON）：刷新之后气泡里还能看到
+                # 当时那张题图 —— 以前只留 sha256 摘要，用户回看时图已经没了。
+                # 用**用户消息**的 id 命名：它本来就挂在用户气泡上，
+                # 会话详情恢复时也按同一个 id 去找（见 store.load_message_images）。
+                # ⚠️ 落盘失败**不该影响这一轮**：图只是输入，模型已经拿到它了。
+                if images:
+                    store.save_message_images(req.thread_id,
+                                              req.user_message_id or mid, images)
             except vision.VisionConfigError as e:
                 push(*events.error(f"LLM 配置有误：{e}", scope="task"))
                 push(*events.done(mid))
@@ -176,6 +193,11 @@ async def chat(req: ChatRequest):
             meta={"message_id": req.user_message_id} if req.user_message_id else None)
 
         def on_delta(text):
+            # 正文开始出字 = 思考阶段结束（前端也是按这个把"正在思考…"熄火的）。
+            # 记下来只为一件事：思考时长要能落盘，刷新后"思考 N 秒"才不会变成
+            # 一个从 createdAt 起算的荒唐大数。
+            if state["thinking_first"] is not None and state["thinking_end"] is None:
+                state["thinking_end"] = time.time()
             state["streamed"] += len(text)
             push(*events.text_delta(text))
 
@@ -188,7 +210,14 @@ async def chat(req: ChatRequest):
         on_thinking = None
         if config.LLM_SHOW_THINKING:
             def on_thinking(text):
+                now = time.time()
+                if state["thinking_first"] is None:
+                    state["thinking_first"] = now
+                state["thinking_last"] = now
                 state["thinking"] += len(text)
+                # 原文也攒一份：这一轮结束时它会随 assistant 消息一起落盘，
+                # 刷新后"思考过程"才回得来（见下面落盘那段）。
+                state["thinking_text"].append(text)
                 push(*events.thinking_delta(text))
 
         # ---- 会话标题：只在第一轮起，且与主生成**并行** ----
@@ -210,12 +239,17 @@ async def chat(req: ChatRequest):
         #    （HANDOFF §8.70），漏了这一行，"停止"对这条请求就是完全无效且不报错。
         title_thread = None
         is_first_turn = not any(m.get("role") == "assistant" for m in past)
-        if (topic and is_first_turn
+        # ⚠️ `topic or images`：**只拍图不打字**也要起标题。
+        #    以前这里判的是 `topic`，于是拍照搜题（最自然的用法）那一轮压根没人调它 ——
+        #    侧栏永远停在「题目图片」这个兜底名上，用户分不清哪条是哪条。
+        #    起标题那一侧的入参也要跟着带上图片，见 _suggest_title。
+        if ((topic or images) and is_first_turn
                 and not (store.load_session_meta(req.thread_id) or {}).get("title")):
             def _suggest_title():
                 token = llm.set_cancel_token(cancel)
                 try:
-                    t = llm.suggest_thread_title(topic, cfg)
+                    # cfg 在带图时已经是"能读图的那一档"（见上面 resolve_vision_config）
+                    t = llm.suggest_thread_title(topic, cfg, images=images)
                 except Exception:                                  # noqa: BLE001
                     return                      # 起不出来就退回"用户输入前 20 字"
                 finally:
@@ -280,20 +314,41 @@ async def chat(req: ChatRequest):
         #   id     —— 刷新后拿它对上 confirm 时的 task_name（取回分镜与视频）
         #   plan   —— _tasks/threads/<t>.json 只存"当前这一版"，恢复不了每一轮各自的大纲
         #   intent —— 决定恢复后这张卡片是"待确认的大纲"还是"纯文字回答"
-        store.append_thread_message(
-            req.thread_id, "assistant", sb.get("brief") or "",
-            meta={"message_id": mid,
-                  "plan": sb.get("outline") or [],
-                  "intent": sb.get("intent") or "propose",
-                  # 把这一版分镜本体存进 meta：下一轮它会被还原成"模型自己的输出"
-                  # 一起发出去（见 llm._history_with_storyboards）——多轮改一版全靠它。
-                  # ⚠️ 不进 content：那是给人看的（前端聊天框显示的就是它），
-                  #    塞几千字 JSON 会把界面撑坏。
-                  "storyboard": raw,
-                  # 图片**只留摘要**（尺寸/指纹），绝不存 base64：一张图几百 KB，
-                  # 存进会话会让 /api/threads/<id> 返回几 MB 的 JSON。
-                  # 摘要留着只为一件事：排查"当时到底传了几张、多大"。
-                  "images": vision.describe_images(images)})
+        meta = {"message_id": mid,
+                "plan": sb.get("outline") or [],
+                "intent": sb.get("intent") or "propose",
+                # 把这一版分镜本体存进 meta：下一轮它会被还原成"模型自己的输出"
+                # 一起发出去（见 llm._history_with_storyboards）——多轮改一版全靠它。
+                # ⚠️ 不进 content：那是给人看的（前端聊天框显示的就是它），
+                #    塞几千字 JSON 会把界面撑坏。
+                "storyboard": raw,
+                # 图片**只留摘要**（尺寸/指纹），绝不存 base64：一张图几百 KB，
+                # 存进会话会让 /api/threads/<id> 返回几 MB 的 JSON。
+                # 摘要留着只为一件事：排查"当时到底传了几张、多大"。
+                "images": vision.describe_images(images)}
+
+        # 思考过程也落盘（2026-09-18）。不落的话，"刷新一下"就等于把这段推理
+        # 永久删掉 —— 用户的反馈原话是"回来发现深度思考那里不见了"。
+        # 现在它随会话一起回来：折叠态显示"思考 N 秒 · 共 M 字"，想看全文点开即可。
+        #
+        # ⚠️ 两条界，别越：
+        #   1. **不进模型上下文**：`llm._history_with_storyboards()` 只读 `content`
+        #      与 `meta.storyboard`，这里多一个键不会被喂回去。否则每轮都要为
+        #      几万字的推理再付一遍 token。
+        #   2. 只有真的收到过思考才写这个键 —— 没开 `MSB_LLM_SHOW_THINKING` 时
+        #      它与以前逐字节一致，老会话与"无思考"的会话文件也不会变大。
+        thinking_text = "".join(state["thinking_text"])
+        if thinking_text:
+            meta["thinking"] = thinking_text
+            first = state["thinking_first"]
+            last = state["thinking_end"] or state["thinking_last"]
+            if first and last and last > first:
+                # 存**秒数**而不是时间戳：前端只需要显示"N 秒"，
+                # 算好再存就不用两边各推一遍（也就不会两边算出不同的数）。
+                meta["thinking_sec"] = int(round(last - first))
+
+        store.append_thread_message(req.thread_id, "assistant", sb.get("brief") or "",
+                                    meta=meta)
 
         # 落盘：confirm 只会发 thread_id + message_id，分镜本体必须由后端记住。
         store.save_thread_storyboard(req.thread_id, raw, plan=sb.get("outline") or [])
@@ -319,4 +374,5 @@ async def chat(req: ChatRequest):
                           sb.get("title") or ""))
         push(*events.done(mid))
 
-    return sse_response(events.encode_stream(pipeline.stream(run, cancel)))
+    return sse_response(events.encode_stream(
+        pipeline.stream(run, cancel, thread_id=req.thread_id, kind="chat")))

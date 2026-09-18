@@ -98,7 +98,11 @@ async def confirm(req: ConfirmRequest):
                 def run(push):
                     pipeline.pump(pipeline.iter_full(name, raw, cancel), push)
 
-                async for chunk in events.encode_stream(pipeline.stream(run, cancel)):
+                # thread_id 是"停止"按钮唯一的抓手（见 pipeline.register_active）：
+                # 前端那颗按钮只有会话 id，没有任务名。顺带也让它出现在
+                # `/api/threads/<id>` 的 running 里 —— 刷新后用户能知道还在渲。
+                async for chunk in events.encode_stream(
+                        pipeline.stream(run, cancel, thread_id=req.thread_id, kind="render")):
                     yield chunk
         except jobs.QuotaExceeded as e:
             # 配额是"业务上的拒绝"，用 error 事件表达，前端能给出比 HTTP 500 好得多的提示
@@ -141,7 +145,8 @@ async def retry(req: RetryRequest):
                     pipeline.pump(
                         pipeline.iter_incremental(name, raw, range(start, n), cancel), push)
 
-                async for chunk in events.encode_stream(pipeline.stream(run, cancel)):
+                async for chunk in events.encode_stream(
+                        pipeline.stream(run, cancel, thread_id=req.thread_id, kind="render")):
                     yield chunk
         except jobs.QuotaExceeded as e:
             yield events.sse(*events.error(str(e), scope="task"))

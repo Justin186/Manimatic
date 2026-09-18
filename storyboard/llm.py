@@ -55,7 +55,10 @@ class LLMError(Exception):
 
 class LLMCancelled(Exception):
     """
-    用户主动停止（客户端断开），模型调用被就地中断。
+    用户主动停止（`POST /api/cancel`），模型调用被就地中断。
+
+    ⚠️ 注意"客户端断开"**不再是**取消的来源（2026-09-18 改的）：刷新页面/网络抖动
+       也会断连，那时任务应当继续跑完并落盘（见 api/pipeline.py 的 stream()）。
 
     ⚠️ **刻意不做 LLMError 的子类**，这一点是整个机制的关键：
        `chat_stream` / `stream_storyboard` / `generate_storyboard` 里全都是
@@ -731,9 +734,20 @@ _TITLE_SYSTEM = (
 _TITLE_MAX_CHARS = 14
 
 
-def suggest_thread_title(user_text, cfg):
+def suggest_thread_title(user_text, cfg, images=None):
     """
     给这一轮的用户问题起一个会话标题。
+
+    Args:
+        user_text: 用户这轮写的字。**可以为空** —— 只拍一张题图不打字是合法提问
+            （拍照搜题最常见的形态）。
+        cfg: 用哪档模型。⚠️ 带图时调用方给的必须是**能读图的那一档**
+            （chat 路由里带图时已经过 `vision.resolve_vision_config`）。
+        images: 这一轮的题目图片（`vision.normalize` 的产物，带 `data_url`）。
+            给了就**连图一起发过去**。以前这里只发文字，后果是两件事：
+              · 只拍图不打字时压根没人调它 → 侧栏永远叫「题目图片」；
+              · 有字时标题只反映用户那句补充（"只讲第二问"），
+                而题目真正的主题在照片里 —— 起的名字指不到题上。
 
     Returns:
         str: 清洗好的标题（可能为空串，调用方要自己兜底）
@@ -742,13 +756,27 @@ def suggest_thread_title(user_text, cfg):
         LLMError: 配置有误 / 接口报错 / 空内容。**调用方一律静默降级**，不要重试。
     """
     text = (user_text or "").strip()
-    if not text:
+    if not text and not images:
         raise LLMError("用户消息是空的，起不出标题")
+
+    if images:
+        # 与主生成共用同一个构造函数（图在前、文在后），形态保持一致
+        from . import vision
+        note = ("这是一道题的图片（可能是拍照的试卷、课本页面或屏幕截图）。"
+                "请先读图认出题目是什么，再按上面的要求给它起一个会话标题。")
+        if text:
+            # 用户自己写的那句依然保留在最末（指令越靠后越管用）
+            note += f"\n用户还写了：{text[:500]}"
+        content = vision.to_content(note, images)
+    else:
+        # ⚠️ 无图必须是**纯字符串**：数组形态发给纯文本模型会直接 400，
+        #    而且这保证老路径（纯文字提问）的请求体逐字节不变。
+        # 截断：用户可能整段粘贴题目源码，起标题看前面这些就够了
+        content = text[:500]
 
     reply = chat(
         [{"role": "system", "content": _TITLE_SYSTEM},
-         # 截断：用户可能整段粘贴题目源码，起标题看前面这些就够了
-         {"role": "user", "content": text[:500]}],
+         {"role": "user", "content": content}],
         cfg,
         purpose="title",
     )

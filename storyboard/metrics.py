@@ -114,8 +114,127 @@ K_DIGIT = 0.0084
 # 所以取一个能罩住最宽标点的值。**这是保守方向，符合本模块的铁律。**
 K_OTHER = 0.0100
 
+# 「交给中文字体画」的符号（`FALLBACK_RANGES` 那批）比 K_OTHER 宽得多 —— 它们
+# 要么是全角宽度、要么是 CJK 字体里的等宽方块字形，实测 0.0132~0.0149（fs 20）。
+#
+# ⚠️ 2026-09-18 修（就是 ① 白块那次）：这档符号原来落进 `K_OTHER = 0.0100`，
+# 而实测最高 0.0149 —— **低估 33%~49%**，直接违反本模块"宁大不小"的铁律。
+# 表现是校验层说"放得下"、渲染出来却贴边甚至出画（`_fit` 再悄悄缩，打 WARN）。
+# 取 0.0150 与 K_CJK 同值：它们本来就是同一类字形（宋体全角），没必要分两档。
+K_FALLBACK = 0.0150
+
 _NARROW_LOWER = frozenset("ijlfrt")
 _WIDE_LOWER = frozenset("mw")
+
+# 命中判定用的扁平集合（只在第一次需要时建一次）。
+_FALLBACK_CHARS = None
+
+
+def _fallback_chars():
+    """`FALLBACK_RANGES` 展开成的字符集合（缓存）。"""
+    global _FALLBACK_CHARS
+    if _FALLBACK_CHARS is None:
+        _FALLBACK_CHARS = frozenset(
+            chr(cp) for a, b in FALLBACK_RANGES for cp in range(a, b + 1))
+    return _FALLBACK_CHARS
+
+
+def needs_cn_font(ch) -> bool:
+    """
+    这个字符是否必须交给 CN_FONT 画（Times New Roman 没字形，否则是带码点的白方块）。
+
+    刻意收得**比 `FORMULA_TEX_PATTERN` 窄**：正文里只要"Times 真有这个字形"就不该
+    抢去宋体（否则西文风格会漂），而公式那边宁可更保守（见那边注释）。
+    """
+    return ch in _fallback_chars()
+
+# ------------------------------------------------------------------------------
+# 字符分类数据 —— **单一出处**
+# ------------------------------------------------------------------------------
+# 下面三份数据同时被三个地方读，所以定义在这里（纯数据、不 import manim）：
+#   · `dsl.py` 的中英混排 `_markup()`（决定哪个字符交给中文字体画）
+#   · `dsl.py` 的 `formula()` 分流（决定走 pdflatex 还是 ctex）
+#   · `tex_batch.py` 的预热分组（必须与上一行**同一判据**，否则缓存全落空）
+# 为什么强调这一点：本项目最贵的一类 bug 就是"两处规则各写一份、改了一处忘了另一处"
+# —— 它不报错，只表现为"怎么又慢了"或"怎么又出方块了"（2026-09-18 的 ① 白块就是）。
+
+# 「Times New Roman 没有字形、必须交给中文字体画」的码点区间。
+#
+# 怎么来的：2026-09-18 用 GDI `GetGlyphIndicesW` 逐个码点比对
+#   「Times New Roman 缺 且 CN_FONT 有」（只在中文语境真会用到的符号块里找）。
+# ⚠️ 它依赖**本机字体版本**。换字体/换机器后要重跑标定，
+#   `tests/test_glyph_fallback.py` 拿真实渲染核对（越界即回归）。
+FALLBACK_RANGES = (
+    (0x2196, 0x2199),                                        # ↖↗↘↙
+    (0x2208, 0x2208), (0x221D, 0x221D), (0x2220, 0x2220),    # ∈ ∝ ∠
+    (0x2223, 0x2223), (0x2225, 0x2225), (0x2227, 0x2228),    # ∣ ∥ ∧ ∨
+    (0x222A, 0x222A), (0x222E, 0x222E), (0x2234, 0x2237),    # ∪ ∮ ∴∵∶∷
+    (0x223D, 0x223D), (0x224C, 0x224C), (0x2252, 0x2252),    # ∽ ≌ ≒
+    (0x2266, 0x2267), (0x226E, 0x226F), (0x2295, 0x2295),    # ≦≧≮≯ ⊕
+    (0x2299, 0x2299), (0x22A5, 0x22A5), (0x22BF, 0x22BF),    # ⊙ ⊥ ⊿
+    (0x2312, 0x2312),                                        # ⌒
+    (0x2460, 0x2469), (0x2474, 0x249B),                      # ①-⑩ ⑴-⒛
+    (0x2501, 0x254B), (0x256D, 0x2573),                      # 制表符 ─│┌… ╭╮╯╰…
+    (0x2581, 0x258F), (0x2594, 0x2595),                      # 方块元素 ▁▂▃… ▔▕
+    (0x25B3, 0x25B3), (0x25BD, 0x25BD), (0x25C6, 0x25C7),    # △▽◆◇
+    (0x25CE, 0x25CE), (0x25E2, 0x25E5), (0x2605, 0x2606),    # ◎ ◢◣◤◥ ★☆
+    (0x2609, 0x2609),                                        # ☉
+    (0x3220, 0x3229), (0x3231, 0x3231), (0x32A3, 0x32A3),    # ㈠-㈩ ㈱ ㊣
+    (0x338E, 0x338F), (0x339C, 0x339E), (0x33A1, 0x33A1),    # ㎎㎏ ㎜㎝㎞ ㎡
+    (0x33C4, 0x33C4), (0x33CE, 0x33CE), (0x33D1, 0x33D2),    # ㏄ ㏎ ㏑㏒
+    (0x33D5, 0x33D5),                                        # ㏕
+    (0xFE30, 0xFE31), (0xFE33, 0xFE44), (0xFE49, 0xFE4F),    # ︰︱ ︳︴ ﹉﹊…
+)
+
+# `formula()` 该不该改走 ctex(xelatex) 的额外区间（`FALLBACK_RANGES` 之外的部分）。
+#
+# 为什么不逐码点、只按块：pdflatex 缺的是**整类**符号（圈数字、几何图形、CJK 兼容
+# 符号…），按块拦能一并罩住还没被发现的同类字符。**宁可多走一次 ctex，不可漏判**
+# —— 漏判的代价是整个分镜渲不出来（`Unicode character ① not set up for use with
+# LaTeX`），而多走一次的代价只是慢一点点。
+#
+# 为什么它比 `FALLBACK_RANGES` 宽（多了 25A0-25BF 这类"Times 有字形"的）：
+# 两条判据的**坏处方向不同**。正文里误判给宋体只是字形风格差一点（几乎看不出），
+# 公式里误判给 pdflatex 是**一镜全废** —— 所以后者宁可更保守。
+_FORMULA_ONLY_RANGES = (
+    (0x2E80, 0x9FFF),        # CJK 部首扩展 / 汉字（含 `_has_cjk` 原本那一档）
+    (0x3000, 0x303F),        # CJK 标点
+    (0xFF00, 0xFFEF),        # 全角形式
+    (0x2460, 0x24FF),        # 圈数字 / 带括号数字
+    (0x25A0, 0x27BF),        # 几何图形 / 杂项符号 / 装饰符
+    (0x3200, 0x33FF),        # CJK 兼容（㈠ ㎎ ㏒…）
+    (0xFE30, 0xFE4F),        # CJK 兼容形式
+)
+
+
+def _merge_ranges(*groups):
+    """把多组区间并成"互不重叠、已排序"的一份。"""
+    flat = sorted((a, b) for g in groups for a, b in g)
+    out = []
+    for a, b in flat:
+        if out and a <= out[-1][1] + 1:
+            out[-1] = (out[-1][0], max(out[-1][1], b))
+        else:
+            out.append((a, b))
+    return tuple(out)
+
+
+def _ranges_to_charclass(ranges):
+    """区间 → 正则字符类的内容（如 `\\u2460-\\u2469`）。"""
+    parts = []
+    for a, b in ranges:
+        parts.append("\\u%04x" % a if a == b else "\\u%04x-\\u%04x" % (a, b))
+    return "[" + "".join(parts) + "]"
+
+
+# ⚠️ 公式判据**由构造保证是字形回退判据的超集**（`FALLBACK_RANGES` 被并进来）。
+#
+# 为什么不手写两份区间（第一版就是手写的，然后**当场被测试抓出一个漏网**：
+# `∈`(U+2208) 在回退集里、却不在公式正则里 —— 也就是"正文修好了、公式里仍会炸"）。
+# 手写两份区间必须有一个人记得"改一处要同步另一处"，而本项目最贵的 bug 全是
+# 这一类遗忘（它不报错，只静默地少拦一个字符）。并集由代码算，就没有这个选项。
+FORMULA_TEX_RANGES = _merge_ranges(FALLBACK_RANGES, _FORMULA_ONLY_RANGES)
+FORMULA_TEX_PATTERN = _ranges_to_charclass(FORMULA_TEX_RANGES)
 
 # 行高与行距：`rich()` 里多行走 `VGroup(...).arrange(DOWN, buff=0.22)`。
 # 实测 fs=30 四行总高 2.2569 = 4×0.3992 + 3×0.22，两个系数都吻合。
@@ -149,6 +268,10 @@ def _k(ch: str) -> float:
         return K_LOWER
     if "0" <= ch <= "9":
         return K_DIGIT
+    # ⚠️ 顺序有讲究：这些符号（①②◆★→∈…）会被交给宋体画，是**全角字形**，
+    # 比 K_OTHER 宽 33%~49%（见表）。放在 K_OTHER 之前判，否则又是低估。
+    if needs_cn_font(ch):
+        return K_FALLBACK
     return K_OTHER
 
 

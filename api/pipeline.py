@@ -64,7 +64,7 @@ class Canceller:
     """
     取消令牌 + "可强制中断的资源"登记处。
 
-    为什么要登记资源、而不是只 set 一个标志：客户端断开时上层只知道"该停了"，
+    为什么要登记资源、而不是只 set 一个标志：上层要求停止时只知道"该停了"，
     但调用方正**阻塞**在某个 read 上：
       · `for line in proc.stdout`（渲染）——一个分镜要渲十几秒；
       · `for raw in resp`（LLM 流式）——开着深度思考时要等几分钟。
@@ -145,6 +145,88 @@ class Canceller:
 
 def new_cancel():
     return Canceller()
+
+
+# ==============================================================================
+# 显式取消：`POST /api/cancel` 按**会话**找到正在跑的任务并掐掉它
+# ==============================================================================
+#
+# 为什么需要这张表（2026-09-18 的语义变更，起因是一次真实反馈）：
+#   原先"取消"是**靠客户端断开**实现的 —— Starlette 关掉流 → stream() 的 finally
+#   里 cancel()。副作用是"刷新页面 = 停止生成"：按一下 F5，模型调用被掐，
+#   而这一轮的 assistant 消息因为只在生成成功后才落盘，于是磁盘上从来没存在过 ——
+#   用户回来只剩自己那句提问，"深度思考"连痕迹都没有。
+#
+#   现在断开只表示"**没人看了**"（事件丢掉、任务继续跑完并落盘），
+#   真正的"停止"走这个显式入口：前端点停止按钮 → `POST /api/cancel`。
+#
+# 键取 **thread_id**：那颗按钮的语义就是"停下这条会话正在跑的活"（对话生成与渲染
+#   共用同一个按钮），而 thread_id 是前端手上唯一齐全、且不随任务类型变化的键。
+#   `kind` 只服务于下面那条*同类不许并存*的规则（见 chat 路由的用法）。
+_ACTIVE_LOCK = threading.Lock()
+_ACTIVE = {}          # thread_id -> {Canceller: kind}
+
+
+def register_active(thread_id, cancel, kind="chat"):
+    """登记一个正在跑的任务。`thread_id` 为空时什么都不做（旧调用方不受影响）。"""
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return
+    with _ACTIVE_LOCK:
+        _ACTIVE.setdefault(tid, {})[cancel] = kind
+
+
+def unregister_active(thread_id, cancel):
+    """
+    任务结束时注销。
+
+    ⚠️ 注销点在**生产者线程的 finally**，不能在流生成器的 finally：
+       客户端断开之后任务还在跑，这时它仍必须能被"停止"掐掉 ——
+       早一步注销，用户在刷新后的页面上点停止就变成了一个静默失效的按钮。
+    """
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return
+    with _ACTIVE_LOCK:
+        m = _ACTIVE.get(tid)
+        if not m:
+            return
+        m.pop(cancel, None)
+        if not m:
+            _ACTIVE.pop(tid, None)
+
+
+def is_running(thread_id):
+    """
+    这条会话此刻有没有任务在跑（会话详情接口据此告诉前端"刷新前那一轮还在后台"）。
+
+    ⚠️ 是**进程内**状态：多进程/多实例部署时各算各的（与 jobs.py 的配额同一个口径）。
+       这里只用来给界面一句提示，不承担正确性职责。
+    """
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return False
+    with _ACTIVE_LOCK:
+        return bool(_ACTIVE.get(tid))
+
+
+def cancel_thread(thread_id, kind=None):
+    """
+    掐掉这条会话正在跑的任务，返回掐了几条。
+
+    `kind=None` = 全掐 —— 这正是前端"停止"按钮要的语义。
+    """
+    tid = str(thread_id or "").strip()
+    if not tid:
+        return 0
+    with _ACTIVE_LOCK:
+        # 已经在取消中的不再重复掐，也不计进返回值 —— 这个数字是"这次停掉了几个"，
+        # 会打进日志；把已经停掉的算进去，排查时看到"停了 2 个"会以为有两条在跑。
+        targets = [c for c, k in (_ACTIVE.get(tid) or {}).items()
+                   if (kind is None or k == kind) and not c.is_set()]
+    for c in targets:
+        c.cancel()
+    return len(targets)
 
 
 # ==============================================================================
@@ -345,7 +427,7 @@ def iter_full(name, raw, cancel=None):
         for line in proc.stdout:
             if cancel.is_set():
                 proc.kill()
-                _log(f"{name}: 客户端断开，已终止渲染")
+                _log(f"{name}: 收到停止请求，已终止渲染")
                 return
             s = line.rstrip("\n")
             if s.startswith("@@ "):
@@ -520,7 +602,7 @@ def iter_incremental(name, raw, emit_indices, cancel=None):
             for line in proc.stdout:
                 if cancel.is_set():
                     proc.kill()
-                    _log(f"{name}: 客户端断开，已终止渲染")
+                    _log(f"{name}: 收到停止请求，已终止渲染")
                     return
                 s = line.rstrip("\n")
                 if not s.startswith("@@ "):
@@ -601,23 +683,37 @@ def pump(gen, push):
         push(*ev)
 
 
-async def stream(run, cancel):
+async def stream(run, cancel, thread_id=None, kind="chat"):
     """
     阻塞式事件生产者 → 异步生成器。
 
     Args:
         run(push): 在工作线程里执行的函数。`push(event_name, data)` 线程安全，
             回调里也能直接调用（LLM 的 on_delta 就是这么把文字推出来的）。
-        cancel: Canceller。客户端断开时 cancel() 会被调用，
-            它登记的子进程随之被 kill（不然渲染白跑十几秒还占着并发额度）。
+        cancel: Canceller。**只有显式取消**（POST /api/cancel）才会调它的 cancel()，
+            它登记的子进程/HTTP 响应随之被就地掐断。
+        thread_id: 这条流属于哪条会话。给了就会登记进 `_ACTIVE`，
+            于是"停止"按钮能按会话找到它、会话详情也能告诉前端它还在跑。
+        kind: 任务类型（chat / render …）。只用于"同类不许并存"那条规则，
+            对取消本身没有影响（前端停止 = 不区分类型全掐）。
 
     为什么要把这些事情搬到线程里：渲染与 LLM 调用都是**阻塞**的（Popen 逐行读、
     tex_batch 起 latex、urllib 等响应），直接在事件循环里跑会卡死整个服务
     （所有请求一起等）。搬到线程 + asyncio.Queue，就既保持了同步的写法，
     又不阻塞事件循环。
 
-    客户端中途断开时 Starlette 会关掉这个生成器 → finally 里 cancel()
-    → 生产者线程的子进程立刻被杀掉，循环随之退出。
+    ============================================================================
+    ⚠️ 客户端断开 **不等于** 取消（2026-09-18 改的，别改回去）
+    ============================================================================
+    这条流断掉的原因有三种，只有第三种才是"用户想让任务停"：
+      1. 用户按 F5 / 关标签页 —— 浏览器关掉所有连接；
+      2. 网络抖动、代理掐掉空闲连接；
+      3. 用户点了"停止"（前端先发 `POST /api/cancel`，再断掉本地读流）。
+
+    原先三种一律当第三种处理（finally 里 cancel()），代价是"刷新一下，这一轮就没了"：
+    模型调用被掐、assistant 消息因为还没落盘而永远不存在。所以现在：
+      · 断开只把 `gone` 置上 —— 事件不再往队列里灌（没人看了），**任务继续跑完并落盘**；
+      · 真正的停止走显式接口（见上面 `cancel_thread`）。
 
     ============================================================================
     心跳：为什么长任务必须一直有字节在流
@@ -633,12 +729,17 @@ async def stream(run, cancel):
     loop = asyncio.get_running_loop()
     queue = asyncio.Queue()
     stop_beat = threading.Event()
+    # 客户端已经走人（但任务不因此停）。置上之后 push 直接丢 —— 队列没人消费，
+    # 不丢的话思考流那 1~2 万条事件会一直堆在内存里（一晚上能堆出可观的一坨）。
+    gone = threading.Event()
 
     def push(event, data):
+        if gone.is_set():
+            return                    # 没人看了：丢掉，任务照跑（结果落盘）
         try:
             loop.call_soon_threadsafe(queue.put_nowait, (event, data))
         except RuntimeError:
-            pass                      # 事件循环已关（连接断了），丢掉即可
+            pass                      # 事件循环已关（服务在关停），丢掉即可
 
     def beat():
         # 不做"只在真正空闲时才发"的优化是刻意的：注释行只有 8 个字节，
@@ -657,35 +758,58 @@ async def stream(run, cancel):
     #    于是"提问 → 落盘"这条人人都会走的路径会把会话写进公共区：
     #    登录后看不到自己的会话，而错误信息什么都说明不了。
     from .auth import scope as _identity
-    scoped_run = _identity.bind_context(run)
 
-    def body():
-        # ★ 把取消令牌登记进**这个线程**的上下文里。
-        #
-        # ⚠️ 必须在这里（线程体内部）set，不能在外面 set 完再起线程：
-        #    ContextVar **不会**自动继承进新线程 —— 在外面设的那个只属于调用方
-        #    上下文，线程里 `_CANCEL_TOKEN.get()` 拿到的是 None，于是
-        #    llm.py 的 check_cancelled() 永远不触发，"停止"又回到停不掉的状态。
-        #    这个坑很隐蔽：不报错、不打日志，只是"按钮点了没反应"。
+    def run_with_token(push):
+        """
+        跑 `run`，并**在它所在的 context 里**登记取消令牌。
+
+        ⚠️⚠️ 这里是同一个 ContextVar 陷阱的**第二次登场**，2026-09-18 才被发现：
+            原先令牌是在 `body()` 里（线程自身的上下文）set 的，而"身份"那个 context
+            是在 stream() 里 `copy_context()` 好后由 `ctx.run(run)` 执行的 ——
+            **`ctx.run` 会把当前上下文整个换成那份快照**，于是线程里 set 的令牌
+            在 run() 内部根本看不见：`_CANCEL_TOKEN.get()` 拿到 None
+            → `check_cancelled()` 永不触发、`token.watch(resp)` 也没登记
+            → **"停止"停不掉模型调用**（渲染子进程另有一条 `cancel.is_set()` 的
+               检查，所以只有"渲染能停、模型停不掉"这一半坏掉，更难看出来）。
+            症状与 HANDOFF §8.70 记的那个坑一模一样：不报错、不打日志，就是停不掉。
+
+            所以令牌必须设在**即将执行 run 的那份 context 里** ——
+            把它和 run 一起交给 bind_context，让 ctx.run() 从里面跑。
+        """
         token = llm.set_cancel_token(cancel)
         try:
-            # 用 scoped_run（带登录身份的 context）而不是裸 run —— 见上面那段说明
+            run(push)
+        finally:
+            llm.reset_cancel_token(token)
+
+    scoped_run = _identity.bind_context(run_with_token)
+
+    def body():
+        try:
+            # 用 scoped_run（带登录身份 + 取消令牌的 context）而不是裸 run
             scoped_run(push)
         except llm.LLMCancelled:
             # 用户主动停止：**不是故障**，不能走下面那条 error 分支 ——
             # 那会让前端在用户刚刚按下"停止"之后弹一条红色报错。
             # 也不打 traceback：这是预期路径，不是异常。
-            _log("客户端停止，已中断模型调用")
+            _log("收到停止请求，已中断模型调用")
         except Exception as e:        # 兜底：任何异常都要变成一条 error，不能让流无声无息断掉
             traceback.print_exc()
             push(*events.error(f"服务端异常：{type(e).__name__}: {e}", scope="task"))
         finally:
-            llm.reset_cancel_token(token)
+            # 注销必须在这里（任务真的结束了），不能在流生成器的 finally ——
+            # 客户端断开时任务还在跑，那期间它仍要能被"停止"找到。
+            unregister_active(thread_id, cancel)
+            if gone.is_set():
+                # 前端早走了：这一轮是"跑完了但没人看"，说出来 —— 否则排查时
+                # 只看到"没有 done 事件"，会以为是流坏了。
+                _log(f"客户端已断开，任务仍跑完（thread={thread_id}，结果已落盘）")
             try:
                 loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
             except RuntimeError:
                 pass
 
+    register_active(thread_id, cancel, kind)
     threading.Thread(target=body, daemon=True, name="msb-producer").start()
     if config.SSE_HEARTBEAT_SEC > 0:
         threading.Thread(target=beat, daemon=True, name="msb-heartbeat").start()
@@ -697,4 +821,6 @@ async def stream(run, cancel):
             yield item
     finally:
         stop_beat.set()
-        cancel.cancel()
+        # ⚠️ 这里**只**停止投递，绝不 cancel()：断开有三成原因是刷新/网络抖动，
+        #    把它当成"停止"就等于"按一下 F5 这一轮白跑"（见上面那段 ⚠️）。
+        gone.set()

@@ -24,6 +24,7 @@ task 目录 / 产物路径管理。
     output/videos/<name>_scene/<quality>/…  ← 对外的成片与分段（/media 挂的就是它）
 """
 
+import base64
 import json
 import os
 import re
@@ -297,6 +298,87 @@ def append_thread_message(thread_id, role, content, meta=None):
     return msgs
 
 
+# ---------------- 消息里的题目图片 ----------------
+#
+# ⚠️ 为什么图片**另存成文件**、而不是塞进 messages JSON：
+#    一张降采样后的题图仍有一两百 KB，base64 还要再胖 37%。写进 `messages/<t>.json`
+#    会让 `/api/threads/<id>` 返回几 MB —— 每次打开会话都得下这一坨，
+#    而它 99% 的时间只是躺在那儿给人看一张缩略图。
+#    所以：**文件落磁盘、记录里只留文件名**（与分镜 JSON 走 meta 是同一个思路）。
+#
+# ⚠️ 目录名用 `<thread>__<user_message>`，与 task 目录同一套命名：删会话时按
+#    `safe_id(thread) + "__"` 整段前缀一次清干净（见 delete_thread），
+#    不需要再维护一份"这张图属于谁"的索引 —— 那种索引迟早会和文件不同步。
+#
+# ⚠️ 它属于**会话数据**、不是渲染产物：`cleanup_stale` 的 keep 名单里必须有它，
+#    否则"清理磁盘"会把用户的题图一起清掉（而那属于"顺带做掉用户没预期的事"）。
+
+def message_image_dir(thread_id, message_id):
+    return os.path.join(tasks_root(), "images", task_name(thread_id, message_id))
+
+
+def save_message_images(thread_id, message_id, images):
+    """
+    把这一轮的题目图片存下来，返回文件名列表（顺序 = 用户上传顺序）。
+
+    ⚠️ 存的是 `vision.normalize()` 之后的**那张**（已降采样、已转 JPEG），
+       不是用户原始上传的几 MB 原图：原图没有任何额外价值，只会让磁盘、内存、
+       和"打开会话时要不要下它"都变重。
+    """
+    if not images:
+        return []
+    d = message_image_dir(thread_id, message_id)
+    os.makedirs(d, exist_ok=True)
+    names = []
+    for i, img in enumerate(images):
+        m = re.match(r"^data:image/[-\w.+/]+;base64,(.*)$", str(img.get("data_url") or ""), re.S)
+        if not m:
+            continue          # 形态不对就跳过：宁可少一张，也不要写坏一个文件
+        name = f"{i}.jpg"
+        try:
+            with open(os.path.join(d, name), "wb") as f:
+                f.write(base64.b64decode(m.group(1)))
+        except (OSError, ValueError):
+            continue
+        names.append(name)
+    return names
+
+
+def load_message_images(thread_id, message_id):
+    """
+    读回文件名清单（**不读内容**）。
+
+    会话详情接口只给名字，图片本体走 `/api/threads/<t>/images/<m>/<name>`
+    那条带归属校验的路由按需取 —— 列表接口不该顺带把几百 KB 的图片也塞进去。
+    """
+    d = message_image_dir(thread_id, message_id)
+    try:
+        names = [n for n in os.listdir(d) if n.endswith(".jpg")]
+    except OSError:
+        return []
+    names.sort(key=lambda n: int(n[:-4]) if n[:-4].isdigit() else 0)
+    out = []
+    for n in names:
+        try:
+            out.append({"name": n, "bytes": os.path.getsize(os.path.join(d, n))})
+        except OSError:
+            continue
+    return out
+
+
+def message_image_path(thread_id, message_id, name):
+    """
+    一张图的绝对路径；名字不合法（想拼路径穿越）或文件不在时返回 None。
+
+    ⚠️ 名字必须走**白名单正则**（`\\d{1,2}.jpg`）而不是"过滤掉 .."：
+       `name` 是从 URL 直接拿的，是这条路唯一的注入面。
+    """
+    if not re.fullmatch(r"\d{1,2}\.jpg", str(name or "")):
+        return None
+    p = os.path.join(message_image_dir(thread_id, message_id), str(name))
+    return p if os.path.isfile(p) else None
+
+
 # ---------------- 任务级：某次渲染的分镜快照 ----------------
 
 def save_task_storyboard(name, raw_storyboard, meta=None):
@@ -439,6 +521,9 @@ def list_threads():
             "updatedAt": _now_ms(updated),
             "pinned": bool(meta.get("pinned")),
             "shared": bool(str(meta.get("share") or "").strip()),
+            # 已发布到画廊。与 pinned / shared 同构 —— 这三样都是"用户改出来的属性"，
+            # 都躺在 sessions/<t>.json 里，UI 上也就该用同一套方式显示。
+            "gallery": bool(meta.get("gallery")),
         })
     # 排序在服务端定：置顶的永远在最前，其余按最近更新。
     # 让前端自己排的话，两处规则一旦不一致，界面顺序就和接口顺序对不上。
@@ -569,6 +654,31 @@ def _task_index(thread_id):
     return out
 
 
+def _exists_as_owner(stem):
+    """
+    这个**带命名空间前缀**的 stem 在**它自己归属者**的分区里有没有真实数据。
+
+    ⚠️ 为什么不能直接 `thread_exists(stem)`：
+       `thread_exists` → `safe_id` 只剥掉**当前身份**的前缀。以 u3 的身份查 u5 的
+       stem 时，`safe_id("u5_t_a")` 得到 `u3_u5_t_a`（把"u5_t_a"当成了内容又加一层），
+       拼出一个不存在的路径 —— 于是**别人的作品全部被判成"没数据"而被过滤掉**。
+       症状极具误导性：画廊里"只看得见自己发布的东西"，看的是「全部」也一样，
+       而接口不报任何错。同理，`load_session_meta` / `load_thread_messages` 也都有
+       这个问题，所以凡是用**别人的** id 读盘，都必须先切到那个人的身份。
+
+    切身份必须是 `with`（退出即还原）：漏了的话，同一个线程服务下一个请求时
+    就用错人了。归属者反推不出来（老数据、无前缀）时按当前身份问一次即可 ——
+    那批数据本来就落在公共区。
+    """
+    from .auth import scope as _identity
+
+    owner = _identity.uid_from_namespaced(stem)
+    if owner is None or _identity.user_id() == owner:
+        return thread_exists(stem)
+    with _identity.as_user(owner):
+        return thread_exists(stem)
+
+
 def thread_belongs_to_me(thread_id):
     """
     这条会话是不是当前账号的。
@@ -651,6 +761,12 @@ def load_thread_detail(thread_id):
             "createdAt": _now_ms(m.get("at") or time.time()),
         }
         if role != "assistant":
+            # 题目图片：只给**文件名 + 字节数**，前端自己拼成
+            # `/api/threads/<t>/images/<m>/<name>` 去取（见 delete_thread 上面的说明）。
+            # 没有图就不给这个键 —— 老会话的记录与响应一个字都不变。
+            imgs = load_message_images(thread_id, mid)
+            if imgs:
+                item["images"] = imgs
             out.append(item)
             continue
 
@@ -672,6 +788,18 @@ def load_thread_detail(thread_id):
             t = str(raw.get("title") or "").strip()
             if t:
                 item["videoTitle"] = t
+
+        # 思考过程：这一轮的推理原文（只在开了 `MSB_LLM_SHOW_THINKING` 时才落盘）。
+        # 它是"给人看的中间过程"，只在前端"思考过程"那块展开显示 ——
+        # **不进模型上下文**（llm 只读 content 与 meta.storyboard）。
+        th = m.get("thinking")
+        if isinstance(th, str) and th.strip():
+            item["thinking"] = th
+            sec = m.get("thinking_sec")
+            if isinstance(sec, (int, float)) and sec > 0:
+                # 落盘的秒数直接给前端用：否则它只能拿 createdAt 去减，
+                # 一条几天前的消息会显示成"259200s"（荒唐且没意义）。
+                item["thinkingSec"] = int(round(float(sec)))
 
         # 只传这条消息**自己那一轮**的大纲：拿 cur_plan 兜底会把"会话当前这一版"
         # 的分镜标题套到别的产物上（段数由快照决定，标题却会串轮）。
@@ -700,21 +828,79 @@ def build_share_payload(thread_id):
 
     没有成片时也返回一个合法结构（`final=None`），让分享页能显示"这条还没有视频"，
     而不是把 404 的处理推给前端。
+
+    ⚠️ 它是**跨命名空间安全**的（画廊也复用它）：入口先按需求切一次身份。
     """
+    return _payload(thread_id, with_owner=True)
+
+
+def build_gallery_item(thread_id, published_at=0.0):
+    """
+    画廊列表项 —— 只保留封面需要的字段。
+
+    ⚠️ 为什么不直接 `_payload(...)` 加个 publishedAt 就返回：
+       `_payload` 的返回值里带 `segments`（每段好几个字段 + 一个视频地址）。
+       网格里可能同时有 200 张卡，把它原样传出去，等于**为了不点的那 199 张卡**
+       付出了完整分镜清单的流量与解析代价。分段只在该卡片被点开时才去
+       `/api/gallery/<id>` 取（那个接口会回全量）。
+       所以这里**显式挑字段**，而不是"转发一大坨再让前端忽略"。
+
+    `published_at` 由调用方（`list_gallery` 的返回值）带进来，避免二次读盘 ——
+    而二次读盘还要再处理一次身份切换（见 `_payload` 的说明）。
+    """
+    data = _payload(thread_id, with_owner=True)
+    final = data.get("final") or {}
+    segments = data.get("segments") or []
+    return {
+        "threadId": thread_id,
+        "title": data.get("title") or "一段讲解动画",
+        "subtitle": data.get("subtitle") or "",
+        "videoUrl": final.get("url") or "",
+        "durationSec": float(final.get("durationSec") or 0.0),
+        "sceneCount": len(segments),
+        # 毫秒，与前端其它时间戳一致（见 _now_ms 的说明）
+        "publishedAt": _now_ms(published_at),
+        # 成片在不在。**不把它从列表里剔除** —— 视频被 TTL 清掉是运维动作，
+        # 而"作者明明发布过、页面上却什么都没有"会让人以为作品被删了。
+        # 卡片保留、标记成不可播放，是这里一贯的诚实降级。
+        "playable": bool(final.get("url")),
+    }
+
+
+def _payload(thread_id, with_owner=True):
+    """
+    拼分享/画廊数据的**唯一实现**（标题 + 成片 + 分段 + 发布状态）。
+
+    ⚠️ 切身份必须是**第一步**，在任何读盘之前 —— 这一条踩过坑：
+       `load_session_meta` / `load_thread_messages` / `load_thread_detail` 全都按
+       **当前身份**经 `safe_id` 拼路径，而 `safe_id` 的幂等性**只对"自己的前缀"成立**：
+
+           safe_id("u3_t_a") = "u3_t_a"        ← 自己的，幂等
+           safe_id("u5_t_a") = "u3_u5_t_a"     ← 别人的，被当成内容又加了一层层
+
+       于是"先读元数据、后切身份"的写法在读别人的作品时会拼出
+       `u3_u5_t_a.json` 这个不存在的路径，且**不报任何错**（读不到就是空）。
+       表现是标题变成"新的讲解"、发布状态读成未发布、视频地址全空。
+
+    ⚠️ 切身份用 `with`：漏了还原的话，同一个线程服务下一个请求时就用错人了。
+       只在**确实不是当前身份**时才切（自己看自己的作品时无需切换，也避免无谓开销）。
+    """
+    if with_owner:
+        from .auth import scope as _identity
+        owner = _identity.uid_from_namespaced(thread_id)
+        if owner is not None and _identity.user_id() != owner:
+            with _identity.as_user(owner):
+                return _payload(thread_id, with_owner=False)
+
+    # 身份已就位，从这里开始的每一次读盘都落在归属者的分区里。
     meta = load_session_meta(thread_id)
     msgs = load_thread_messages(thread_id)
     title = _thread_title(msgs, meta)
-
-    # ⚠️ 读到一半（而不是在入口处）就把身份切成归属者，是因为上面那三行
-    #    已经各按**当前身份**读了各自的文件、结果自洽；而这里要遍历产物目录，
-    #    必须站在归属者的分区里才找得到（分享页本身没有登录身份）。
-    #    切身份用 with —— 漏了还原的话，同一个线程服务下一个请求时就用错人了。
-    from .auth import scope as _identity
-    owner = _identity.uid_from_namespaced(thread_id)
-    if owner is not None and _identity.user_id() != owner:
-        with _identity.as_user(owner):
-            return _share_payload(thread_id, msgs, meta, title)
-    return _share_payload(thread_id, msgs, meta, title)
+    out = _share_payload(thread_id, msgs, meta, title)
+    # `publishedAt` 一并带出去：调用方（`gallery_item` 路由）要显示发布时间，
+    # 而它自己再读一次 sessions 文件的话又得自己处理身份切换 —— 这里已经切好了。
+    out["publishedAt"] = meta.get("gallery")
+    return out
 
 
 def _share_payload(thread_id, msgs, meta, title):
@@ -831,6 +1017,78 @@ def find_share_slug(slug):
     return ""
 
 
+def list_gallery(limit=200):
+    """
+    已发布到画廊的会话：[(**带命名空间前缀的 stem**, 发布时间戳)]，按发布时间倒序。
+
+    ⚠️ 为什么像 `find_share_slug` 一样**自己扫 sessions/ 目录、直接读文件**，
+       而不是对 `list_threads()` 的结果逐个 `load_session_meta` 过滤：
+       画廊是**公开**读（见 api/routes/threads.py 的 `/api/gallery`），请求里可能
+       压根没有登录身份。而 `load_session_meta` 是按**当前身份**拼路径的 ——
+       在匿名上下文里算出来的路径永远指不到那个人的分区，表现是"画廊永远是空的"，
+       而接口不报任何错。这与分享页踩过的是同一个坑（见 find_share_slug 的注释）。
+
+    ⚠️ 返回的 stem **必须带上别人的前缀原样返回**：下游 `build_share_payload`
+       靠 `uid_from_namespaced` 从里面反推归属者，再临时切身份去读产物。
+       在这里"洗净"成无前缀的名字，会让所有视频都找不到（404）且不报错。
+
+    ⚠️ 与 `list_threads` 相反，这里**不按 messages/ 过滤**是否算一条会话：
+       发布这个动作本身就证明了会话存在过（sessions 文件的写入方是它的接口）。
+       但**会**检查 messages 或 threads 至少有一个真的在 —— 数据被手工删掉
+       却又留下 sessions 的"幽灵发布"不该出现在公开页面上。
+    """
+    d = sessions_dir()
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return []                      # 还没有任何人发布过
+
+    out = []
+    for f in names:
+        if not f.endswith(".json"):
+            continue
+        stem = f[:-5]
+        meta = _read_json(os.path.join(d, f)) or {}
+        if not isinstance(meta, dict):
+            continue
+
+        # ⚠️ 这一条是**成员资格**，不是排序细节：没发布过的会话必须在这里被挡掉。
+        #    漏掉它的后果不是"顺序不对"，而是**所有会话都出现在画廊里** ——
+        #    而 sessions/ 目录是**每个改过标题/置顶/分享的会话**都会有的文件，
+        #    所以那不是"多几条"，是"把用户的全部历史都摆上了公开页面"。
+        #    实测踩过：先前把"取不到时间"回退成文件 mtime，于是没有任何
+        #    gallery 键的会话也被当成已发布，一个都没漏。
+        got = meta.get("gallery")
+        if not got:
+            continue
+
+        # 发布时刻。理论上现在写的都是浮点时间戳；但要是有人（或旧版本）
+        # 只写了 `true`，就退化成文件 mtime —— 排序仍然可用，
+        # 总比"这些作品没有时间、挤在一起"强。**只有已发布的才走到这一步。**
+        try:
+            at = float(got) if not isinstance(got, bool) else 0.0
+        except (TypeError, ValueError):
+            at = 0.0
+        if not at:
+            try:
+                at = os.path.getmtime(os.path.join(d, f))
+            except OSError:
+                at = 0.0
+
+        # 会话数据已被删掉的就不列（点开一片空白，比不显示更糟）。
+        # ⚠️ 见 `_exists_as_owner`：这句话必须在归属者的身份下问，否则
+        #    `safe_id` 会把别人的前缀当内容再叠一层当前前缀，永远查不到。
+        if not _exists_as_owner(stem):
+            continue
+
+        out.append((stem, at))
+
+    out.sort(key=lambda x: -x[1])
+    # 上限：每条都要走一次 build_share_payload（扫该会话的 task 目录）。
+    # 不封顶的话，一个攒了几百条的账号每次打开画廊都要等好几秒。
+    return out[: max(1, int(limit or 200))]
+
+
 def delete_thread(thread_id):
     """
     删掉一条会话：对话历史、分镜快照、用户元数据，以及它名下**全部渲染产物**。
@@ -878,6 +1136,20 @@ def delete_thread(thread_id):
                     removed.append(os.path.basename(p))
                 except OSError:
                     pass
+
+    # 3) 这一轮的**题目图片**（`_tasks/images/<thread>__<user_message>/`）。
+    #    挂在 images/ 下一层，上面那个循环看不到它，所以单独扫一遍 ——
+    #    同样用整段前缀识别，不做模糊匹配（`t_a` 不该误伤 `t_a2`）。
+    #    ⚠️ 删会话必须把它一起删：那是用户自己拍的照片，留着既占地方也说不通
+    #       （界面上那条会话已经不存在了，照片却还在磁盘上）。
+    img_root = os.path.join(root, "images")
+    try:
+        for name in os.listdir(img_root):
+            if name.startswith(prefix) and os.path.isdir(os.path.join(img_root, name)):
+                shutil.rmtree(os.path.join(img_root, name), ignore_errors=True)
+                removed.append(name)
+    except OSError:
+        pass
     return removed
 
 
@@ -908,8 +1180,10 @@ def cleanup_stale(days=None):
     if not os.path.isdir(root):
         return {"removed": [], "days": days}
 
-    # 这三个是会话数据目录，永远不参与清理
-    keep_dirs = {"threads", "messages", "sessions"}
+    # 这几个是会话数据目录，永远不参与清理。
+    # `images`（用户拍的题图）2026-09-18 加进来：它跟对话文字一样属于会话内容，
+    # 不属于"可以按需清的渲染产物"。
+    keep_dirs = {"threads", "messages", "sessions", "images"}
 
     removed = []
     for entry in os.listdir(root):

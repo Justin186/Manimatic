@@ -40,8 +40,15 @@ import subprocess
 import tempfile
 import time
 
-# 与 storyboard/renderer.py 的 formula() 保持一致：含中文走 ctex 模板
-_CJK = re.compile(r"[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]")
+from . import dsl
+
+# 与 `dsl.formula()` 保持一致：含中文 / pdflatex 认不出的符号走 ctex 模板。
+#
+# ⚠️ 这里**必须复用 dsl 的判据，不能自己写一份**：两处漂移的后果是
+# "预热按 A 算了 hash、真渲染按 B 去查" —— 缓存全部落空，预热白做，
+# 而且是静默的（只表现为"怎么又慢了"）。2026-09-18 修 ① 白块时正是
+# 把"只认中文"换成 `needs_ctex`，这个镜像点必须跟着走。
+_CJK = dsl._FORMULA_TEX_RE
 
 # 从生成的代码里抓公式：
 #   formula(r"""...""")          —— 独立公式

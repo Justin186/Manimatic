@@ -106,7 +106,10 @@ async def replace_scene(req: ReplaceSceneRequest):
 
         try:
             cancel = pipeline.new_cancel()
-            async for chunk in events.encode_stream(pipeline.stream(run, cancel)):
+            # 登记 thread_id：不然它既停不掉（前端只有会话 id），
+            # 也不会出现在"这条会话还有活在跑"的提示里。
+            async for chunk in events.encode_stream(
+                    pipeline.stream(run, cancel, thread_id=req.thread_id, kind="render")):
                 yield chunk
         except jobs.QuotaExceeded as e:
             yield events.sse(*events.error(str(e), scope="task"))
@@ -148,7 +151,8 @@ async def replace_scene(req: ReplaceSceneRequest):
                     pipeline.pump(
                         pipeline.iter_incremental(name, updated, [idx], cancel), push)
 
-                async for chunk in events.encode_stream(pipeline.stream(run, cancel)):
+                async for chunk in events.encode_stream(
+                        pipeline.stream(run, cancel, thread_id=req.thread_id, kind="render")):
                     yield chunk
         except jobs.QuotaExceeded as e:
             yield events.sse(*events.error(str(e), scope="task"))
