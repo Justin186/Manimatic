@@ -649,6 +649,16 @@ async def stream(run, cancel):
             except RuntimeError:
                 return                # 事件循环已关，收工
 
+    # ★ 把**当前请求的 context**（里面有登录身份）复制下来。
+    #
+    # ⚠️ 必须在这里复制、不能在 body() 里复制：ContextVar **不会自动进入新线程**，
+    #    而 stream() 是在路由处理函数里被调用的 —— 只有此刻的 context 里才有身份。
+    #    漏了这一步，`store.*` 在工作线程里算出来的命名空间是**空的**，
+    #    于是"提问 → 落盘"这条人人都会走的路径会把会话写进公共区：
+    #    登录后看不到自己的会话，而错误信息什么都说明不了。
+    from .auth import scope as _identity
+    scoped_run = _identity.bind_context(run)
+
     def body():
         # ★ 把取消令牌登记进**这个线程**的上下文里。
         #
@@ -659,7 +669,8 @@ async def stream(run, cancel):
         #    这个坑很隐蔽：不报错、不打日志，只是"按钮点了没反应"。
         token = llm.set_cancel_token(cancel)
         try:
-            run(push)
+            # 用 scoped_run（带登录身份的 context）而不是裸 run —— 见上面那段说明
+            scoped_run(push)
         except llm.LLMCancelled:
             # 用户主动停止：**不是故障**，不能走下面那条 error 分支 ——
             # 那会让前端在用户刚刚按下"停止"之后弹一条红色报错。

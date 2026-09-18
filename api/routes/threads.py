@@ -52,7 +52,13 @@ async def thread_detail(thread_id: str):
        "新建会话 → 立刻跳进去"这条正常路径上，这个 id 本来就还没落到磁盘，
        报 404 会让新建会话一进页面就弹错。对使用者来说，
        "这个会话还没有消息"和"还没有这个会话"本来就是一回事。
+
+    ★ 归属校验（数据隔离）：id 是**客户端给的**，不加判断的话 A 把 B 的
+      thread_id 填进 URL 就能读到别人的对话。不属于自己的返回空 ——
+      与"不存在"同样处理，不给"这个 id 存在但不是你的"这种信息。
     """
+    if not store.thread_belongs_to_me(thread_id):
+        return {"thread_id": thread_id, "messages": []}
     return {
         "thread_id": thread_id,
         "messages": store.load_thread_detail(thread_id),
@@ -75,7 +81,13 @@ async def patch_thread(thread_id: str, req: PatchThreadRequest):
        都要吃它，而界面上根本看不出是"标题太长"，只会觉得"列表卡了"。
     ⚠️ 会话不存在就直接拒绝，否则会凭空造出一个只有元数据的"幽灵会话" ——
        它不会出现在列表里（列表以 messages/ 为准），却永远留在磁盘上。
+
+    ★ 归属校验：这条是**写**接口，不校验就等于"只要知道别人的 thread_id
+      就能改他的标题/置顶"。返回话术统一用"没有这个会话"，不泄露存在性。
     """
+    if not store.thread_belongs_to_me(thread_id):
+        return {"ok": False, "error": "没有这个会话"}
+
     patch = {}
     if req.title is not None:
         t = req.title.strip()
@@ -103,7 +115,11 @@ async def delete_thread(thread_id: str):
        - 前端必须先让用户确认。这一层拦不住任何东西，它只能保证"删的确实是这个 id"；
        - `store.delete_thread` 用**整段前缀**（`<id>__`）识别 task 目录，绝不模糊匹配
          —— 否则 `t_4rf2aue` 会误伤 `t_4rf2aue2` 的产物。
+
+    ★ 归属校验：这是**破坏性**接口，不校验等于"知道 id 就能删别人的视频"。
     """
+    if not store.thread_belongs_to_me(thread_id):
+        return {"ok": False, "error": "没有这个会话"}
     if not store.thread_exists(thread_id) and not store.load_session_meta(thread_id):
         return {"ok": False, "error": "没有这个会话"}
     removed = store.delete_thread(thread_id)
@@ -122,7 +138,12 @@ async def share_thread(thread_id: str, req: ShareRequest):
     ⚠️ 只返回 slug，**不返回完整 URL**：后端知道自己的地址（MSB_PUBLIC_BASE_URL 是
        media 的前缀），但不知道前端跑在哪个端口。拼出一个打不开的链接，是那种
        很难被当成 bug 看出来的错。前端有 location.origin，它来拼最准。
+
+    ★ 归属校验：分享是**把内容公开出去**的动作，不校验等于"能把别人的视频
+      一键发到公网"。
     """
+    if not store.thread_belongs_to_me(thread_id):
+        return {"ok": False, "error": "没有这个会话"}
     if not store.thread_exists(thread_id):
         return {"ok": False, "error": "没有这个会话"}
 

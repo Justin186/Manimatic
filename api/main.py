@@ -31,7 +31,7 @@ from fastapi.staticfiles import StaticFiles
 
 from storyboard import latex_env
 
-from . import __version__, config, jobs, store
+from . import __version__, auth, config, jobs, store
 from .routes import chat as chat_routes
 from .routes import render as render_routes
 from .routes import settings as settings_routes
@@ -44,6 +44,8 @@ async def lifespan(_app):
     os.makedirs(config.OUTPUT_DIR, exist_ok=True)
     os.makedirs(os.path.join(config.OUTPUT_DIR, "videos"), exist_ok=True)
     os.makedirs(store.tasks_root(), exist_ok=True)
+    # 账号：建表 + 确保超级管理员存在。**必须在横幅之前** —— 初始密码要靠横幅喊出来。
+    auth.startup()
     _banner()
     try:
         result = store.cleanup_stale()
@@ -75,6 +77,11 @@ app.include_router(render_routes.router, prefix="/api", tags=["render"])
 app.include_router(storyboard_routes.router, prefix="/api", tags=["storyboard"])
 app.include_router(settings_routes.router, prefix="/api", tags=["settings"])
 app.include_router(threads_routes.router, prefix="/api", tags=["threads"])
+
+# 账号体系：闸门（/api/** 需登录）+ `/api/auth/*` 五个端点。
+# ⚠️ 必须在这五个 include_router **之后**装：它要把闸门追加到中间件栈的
+#    最内层（CORS 之内），而栈在首次请求时才装配（见 auth/guard.py 文件头）。
+auth.install(app)
 
 
 @app.get("/", include_in_schema=False)

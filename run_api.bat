@@ -42,6 +42,31 @@ REM                           closed)
 REM
 REM  Image input lives in storyboard/vision.py + POST /api/chat's optional
 REM  "images" field. There is no plugin directory any more.
+REM
+REM ---- accounts / auth (api/auth/) ----
+REM  With auth on, EVERY /api/** endpoint needs a login. Means:
+REM  the frontend MUST talk to the real backend (NEXT_PUBLIC_USE_MOCK=false),
+REM  otherwise it hits its own mock routes and never sees this service.
+REM
+REM    MSB_AUTH_ENABLED     1 = on (default). 0 = NO auth at all: every
+REM                         endpoint is wide open. Debugging only.
+REM    MSB_AUTH_ROOT_EMAIL  the pre-created super admin. Default below.
+REM    MSB_AUTH_ROOT_PASSWORD
+REM                         password for that account. If left empty the
+REM                         service generates one and prints it ONCE in the
+REM                         startup banner - write it down, it is not stored
+REM                         in any recoverable form.
+REM    MSB_AUTH_INVITE      registration needs this code. Empty = sign-up is
+REM                         CLOSED (missing value must mean "deny").
+REM    MSB_AUTH_SESSION_DAYS  how long a login lasts (default 14).
+REM    MSB_AUTH_ADOPT_LEGACY
+REM                         1 (default) = on first run, move the sessions
+REM                         that were created BEFORE accounts existed into
+REM                         the super admin's namespace. Set 0 to skip.
+REM
+REM  NOTE: the legacy sessions currently live in the shared namespace, so
+REM  after your first login you will see them only if adopt ran (it prints
+REM  how many items it moved).
 REM ============================================================
 
 cd /d D:\Manimatic\MathStoryboard
@@ -71,11 +96,25 @@ set MSB_VI_PROFILE=
 
 set MSB_VI_MAX_IMAGES=4
 
+REM ---- accounts / auth (api/auth/) ----
+REM 1 = every /api/** endpoint requires a login. 0 = no auth at all.
+set MSB_AUTH_ENABLED=1
+REM super admin, created on startup if missing (its password is NEVER reset
+REM after that - change it from the admin panel, not from here)
+set MSB_AUTH_ROOT_EMAIL=admin@example.com
+REM leave empty = generate a random one and print it once in the banner
+set MSB_AUTH_ROOT_PASSWORD=
+REM registration code. Empty = sign-up closed (admin creates accounts).
+set MSB_AUTH_INVITE=
+REM 1 = move pre-account sessions into the super admin's namespace (once)
+set MSB_AUTH_ADOPT_LEGACY=1
+
 echo ============================================
 echo  Manimatic API   http://localhost:8000/docs
 echo  profile=%MSB_LLM_PROFILE%  (empty = llm.local.json active)
 echo  show_thinking=%MSB_LLM_SHOW_THINKING%
 echo  vi_allow=%MSB_VI_ALLOW%  vi_profile=%MSB_VI_PROFILE%  vi_max_images=%MSB_VI_MAX_IMAGES%
+echo  auth=%MSB_AUTH_ENABLED%  root=%MSB_AUTH_ROOT_EMAIL%  register=%MSB_AUTH_INVITE%
 echo  endpoints: POST /api/chat (accepts optional "images")
 echo ============================================
 echo.

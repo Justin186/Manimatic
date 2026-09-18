@@ -38,8 +38,39 @@ _SAFE = re.compile(r"[^A-Za-z0-9_-]")
 
 
 def safe_id(s, default="anon", limit=48):
+    """
+    id → 可安全拼进路径的名字。**所有"由 id 拼路径"的地方都走这一个函数**
+    （见 HANDOFF 的账号体系一节：正因为只有这一个入口，数据隔离才能只改这里）。
+
+    ★ 加上了**账号命名空间**前缀（`u<id>_`）：登录用户的会话、分镜、产物
+      全部落在自己的分区里，A 拿不到 B 的。未登录时前缀为空，行为与以前一致。
+
+    ⚠️ 必须幂等：`list_threads()` 会把**已经带前缀**的文件名再喂回本函数。
+       幂等性由 `auth.scope.scoped_safe_id` 保证（先剥前缀再清洗再拼回）。
+    """
+    from .auth import scope as _identity
+    return _identity.scoped_safe_id(_raw_safe_id, s, default, limit)
+
+
+def _raw_safe_id(s, default="anon", limit=48):
+    """真正做清洗的那一步。**只应由 safe_id 调用**（否则会绕过命名空间）。"""
     s = _SAFE.sub("_", str(s or ""))[:limit]
     return s or default
+
+
+def _in_my_namespace(stem):
+    """
+    这个"已经是文件名形态"的名字属不属于当前账号。
+
+    用**归属者 id 比对**，而不是字符串前缀比对：`stem` 里可能挂着别人的前缀
+    （`u7_t_abc`），直接比 prefix 会把"u1_" 和 "u17_" 这类判错。
+    无归属者（老数据）只有在**没有登录身份**时才可见 —— 也就是升级前的
+    单租户行为原样保留；一旦登录，它就只属于"还没收编"的那批数据。
+    """
+    from .auth import scope as _identity
+    owner = _identity.uid_from_namespaced(stem)
+    me = _identity.user_id()
+    return owner == me
 
 
 def task_name(thread_id, message_id):
@@ -144,6 +175,22 @@ def save_thread_storyboard(thread_id, raw_storyboard, plan=None, task=None):
 def load_thread_storyboard(thread_id):
     data = _read_json(thread_file(thread_id)) or {}
     return data.get("storyboard"), data.get("plan") or []
+
+
+def clear_thread_storyboard(thread_id):
+    """
+    删掉"这个会话当前这一版分镜"。
+
+    为什么要单独有它：`storyboard.save_thread_storyboard` 每次都以
+    **同一个文件名**写入（路径由 thread_id 决定），而文件名是隔离的
+    （`u1_t.json`）、内容不是 —— 里面存的 `storyboard` 是会话内**最后一条**
+    尚未渲染的代码，可能属于另一个账号。所以在跨分区返回之前必须清一次。
+    """
+    try:
+        os.remove(thread_file(thread_id))
+        return True
+    except OSError:
+        return False
 
 
 # ---------------- 会话级：对话历史（多轮上下文的原料）----------------
@@ -358,6 +405,11 @@ def list_threads():
 
     返回的 id 取自**文件名**（它已经是 safe_id 清洗过的形态）。这是安全的：
     safe_id 幂等，前端把这个 id 原样发回来时清洗结果不变，仍指向同一个文件。
+
+    ⚠️ messages/ 是**所有账号共用**的一个目录，所以这里必须按"本命名空间下
+       消息文件真的存在"过滤一遍。不过滤的话，每个登录用户都会看到别人的会话
+       以"只有 id、没有内容"的幽灵条目形式出现在侧栏里 —— 而这正是最容易
+       被当成"数据没隔离"的一幕。
     """
     root = tasks_root()
     d = os.path.join(root, "messages")
@@ -366,6 +418,7 @@ def list_threads():
     except OSError:
         return []                      # 还没有任何对话（目录都还没建）
     ids = {f[:-5] for f in names if f.endswith(".json")}
+    ids = {tid for tid in ids if _in_my_namespace(tid)}
 
     out = []
     for tid in ids:
@@ -516,6 +569,21 @@ def _task_index(thread_id):
     return out
 
 
+def thread_belongs_to_me(thread_id):
+    """
+    这条会话是不是当前账号的。
+
+    ⚠️ 关键的一条：请求里的 `thread_id` **完全由客户端给**。没有这一道，
+       A 只要把 B 的 thread_id 填进 URL 就能读到、改名甚至删掉 B 的会话
+       （路径是拼出来的，拼出来就能访问）。所以凡是"按 id 取一条会话"的
+       写操作都必须先问这一句。
+
+    `thread_id` 可能带前缀（列表页给的就是带前缀的），所以按**归属者**判断，
+    不按字符串前缀判断。老数据（无前缀）落在"未登录才可见"那一档。
+    """
+    return _in_my_namespace(str(thread_id or ""))
+
+
 def load_thread_detail(thread_id):
     """
     一个会话的完整可恢复状态（消息数组 + 每条助手消息的渲染状态）。
@@ -637,6 +705,20 @@ def build_share_payload(thread_id):
     msgs = load_thread_messages(thread_id)
     title = _thread_title(msgs, meta)
 
+    # ⚠️ 读到一半（而不是在入口处）就把身份切成归属者，是因为上面那三行
+    #    已经各按**当前身份**读了各自的文件、结果自洽；而这里要遍历产物目录，
+    #    必须站在归属者的分区里才找得到（分享页本身没有登录身份）。
+    #    切身份用 with —— 漏了还原的话，同一个线程服务下一个请求时就用错人了。
+    from .auth import scope as _identity
+    owner = _identity.uid_from_namespaced(thread_id)
+    if owner is not None and _identity.user_id() != owner:
+        with _identity.as_user(owner):
+            return _share_payload(thread_id, msgs, meta, title)
+    return _share_payload(thread_id, msgs, meta, title)
+
+
+def _share_payload(thread_id, msgs, meta, title):
+    """真正拼分享数据的那一半（身份已经切对了）。"""
     picked = None
     for m in load_thread_detail(thread_id):
         r = m.get("render")
@@ -722,19 +804,30 @@ def find_share_slug(slug):
     多一张表就多一个"删会话时忘了删表"的漏，而这里量级很小（内网、少量用户），
     根本不需要索引。
     """
+    # ⚠️ 必须**跨命名空间**找：分享页是公开的（白名单放行），请求里根本没有
+    #    登录身份，而它要读的偏偏是**别人的**会话。所以这里自己扫 sessions/
+    #    目录、直接读文件，返回**带前缀的 stem** —— 归属者信息就藏在那个前缀里，
+    #    回调方（`build_share_payload`）据此临时切成那个人的身份去读。
+    #
+    #    ⚠️ 不能用 `load_session_meta` 逐个试：它会按**当前身份**拼路径，
+    #       在匿名上下文里算出来的路径是错的（永远找不到），表现是
+    #       "分享页能打开、视频全 404"，而错误信息什么都说明不了。
     want = str(slug or "").strip()
     if not want:
         return ""
+    d = sessions_dir()
     try:
-        names = os.listdir(sessions_dir())
+        names = os.listdir(d)
     except OSError:
         return ""
     for f in names:
         if not f.endswith(".json"):
             continue
-        tid = f[:-5]
-        if str(load_session_meta(tid).get("share") or "").strip() == want:
-            return tid
+        stem = f[:-5]
+        # 老数据（无前缀）在公共区：顺手按无身份读一次，保持升级前的行为
+        meta = _read_json(os.path.join(d, f)) or {}
+        if isinstance(meta, dict) and str(meta.get("share") or "").strip() == want:
+            return stem
     return ""
 
 

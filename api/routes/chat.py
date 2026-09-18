@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from storyboard import llm, templates, vision
 
 from .. import config, events, pipeline, store
+from ..auth import scope
 from ._common import error_stream, sse_response
 
 router = APIRouter()
@@ -224,8 +225,14 @@ async def chat(req: ChatRequest):
                     # 标题一到就推（不必等主生成），侧栏立刻改名
                     push(*events.thread_title(t))
 
-            title_thread = threading.Thread(target=_suggest_title, daemon=True,
-                                            name="msb-title")
+            # ⚠️ 这一层 context 复制**不能省**：它只为了 `save_session_meta`
+            #    那一行 —— 那个调用要按**当前账号**拼路径，而 ContextVar 不跨线程。
+            #    漏了的话标题会被写进公共区的 `t_xxx.json`：界面上一切正常
+            #    （SSE 已经推过去了），但刷新之后标题就没了，且永远差这一份。
+            #    这就是 HANDOFF §8.70 那个坑的第二次登场。
+            title_thread = threading.Thread(
+                target=scope.bind_context(_suggest_title), daemon=True,
+                name="msb-title")
             title_thread.start()
 
         try:
